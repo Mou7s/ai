@@ -7,11 +7,12 @@ Live site: [ai.mou7s.com](https://ai.mou7s.com)
 ## Using the chart
 
 - Drag to rotate, scroll to zoom, and hover over a point to inspect its metrics.
+- Press `1` for intelligence/time, `2` for cost/time, `3` for intelligence/cost, and `4` to return to free 3D. Plane views use orthographic projection with a locked angle; drag to pan. Better values point toward the upper right.
 - Press `/` to search by model or provider. Search ignores case and splits letters from numbers, so `deep4.1` matches DeepSeek V4.1 Flash.
 - Use ↑ / ↓ to select a search result, Enter to locate it, and Esc to close search. Results show intelligence, cost, and time; unavailable metrics appear as `—` and cannot be located.
 - Double-click a point to center the camera without changing axis bounds or marker sizes.
 - Right-click a point to hide it for the current browser session. Searching for a hidden model and selecting it restores it.
-- Press R to show all models and restore the initial camera. Shortcuts do not interrupt typing in the search field.
+- Press R to show all models and reset the current view. Shortcuts do not interrupt typing in the search field.
 
 Axes use muted blue (intelligence), green (cost), and purple (time). Bounds start at zero and end on regular ticks. The **Ideal corner** marks the direction of higher intelligence, lower cost, and less time; it is not a combined model ranking.
 

@@ -120,6 +120,25 @@ async function locateModel(model) {
   closeSearch();
 }
 const initialCamera = () => ({ eye: { x: 1.65, y: 1.65, z: 1.1 }, up: { x: 0, y: 0, z: 1 }, projection: { type: 'perspective' } });
+const currentView = ref('4');
+const planeViews = {
+  '1': { eye: { x: 0, y: 2.5, z: 0 }, up: { x: 0, y: 0, z: -1 }, hidden: 'yaxis' },
+  '2': { eye: { x: 2.5, y: 0, z: 0 }, up: { x: 0, y: 0, z: -1 }, hidden: 'xaxis' },
+  '3': { eye: { x: 0, y: 0, z: 2.5 }, up: { x: 0, y: -1, z: 0 }, hidden: 'zaxis' }
+};
+const viewCamera = () => currentView.value === '4' ? initialCamera() : {
+  eye: { ...planeViews[currentView.value].eye }, up: { ...planeViews[currentView.value].up }, center: { x: 0, y: 0, z: 0 }, projection: { type: 'orthographic' }
+};
+async function handleViewKey(event) {
+  if (!['1', '2', '3', '4'].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey || event.repeat || event.isComposing || searchOpen.value) return;
+  if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+  if (!ready || !chart.value) return;
+  event.preventDefault();
+  currentView.value = event.key;
+  hoveredModelId = null;
+  hoveredPoint = null;
+  await Plotly.react(chart.value, createTraces(), getLayout(true), config).catch(console.error);
+}
 let ready = false;
 let hoveredModelId = null;
 let hoveredPoint = null;
@@ -210,9 +229,9 @@ const getLayout = (resetCamera = false) => ({
   showlegend: false,
   uirevision: resetCamera ? Date.now() : 'model-chart-camera',
   scene: {
-    xaxis: axis('X · Intelligence Index', modelRange('intelligence'), '#7b9bc9'),
-    yaxis: axis('Y · Cost per Task (USD)', modelRange('cost'), '#7ba58b', true, '$'),
-    zaxis: axis('Z · Time per Task (min)', modelRange('timeSeconds', 60), '#a18bc5', true),
+    xaxis: { ...axis('X · Intelligence Index', modelRange('intelligence'), '#7b9bc9'), visible: planeViews[currentView.value]?.hidden !== 'xaxis' },
+    yaxis: { ...axis('Y · Cost per Task (USD)', modelRange('cost'), '#7ba58b', true, '$'), visible: planeViews[currentView.value]?.hidden !== 'yaxis' },
+    zaxis: { ...axis('Z · Time per Task (min)', modelRange('timeSeconds', 60), '#a18bc5', true), visible: planeViews[currentView.value]?.hidden !== 'zaxis' },
     annotations: [{
       x: modelRange('intelligence')[1] - 0.001,
       y: modelRange('cost')[0] + 0.001,
@@ -230,8 +249,8 @@ const getLayout = (resetCamera = false) => ({
       borderpad: 4
     }],
     aspectmode: 'cube',
-    ...(resetCamera ? { camera: initialCamera() } : {}),
-    dragmode: 'orbit'
+    ...(resetCamera ? { camera: viewCamera() } : {}),
+    dragmode: currentView.value === '4' ? 'orbit' : 'pan'
   },
   hoverlabel: { bgcolor: '#ffffff', bordercolor: '#cbd5e1', font: { color: '#26354a', size: 12 } }
 });
@@ -293,7 +312,7 @@ async function resetAll(event) {
   hoveredPoint = null;
 
   await Plotly.react(chart.value, createTraces(), getLayout(true), config).catch(console.error);
-  Plotly.relayout(chart.value, { 'scene.camera': initialCamera() }).catch(console.error);
+  Plotly.relayout(chart.value, { 'scene.camera': viewCamera() }).catch(console.error);
 }
 
 function handleContextMenu(event) {
@@ -355,6 +374,7 @@ onMounted(async () => {
     chart.value.addEventListener('contextmenu', handleContextMenu);
     window.addEventListener('keydown', resetAll);
     window.addEventListener('keydown', handleSearchKey);
+    window.addEventListener('keydown', handleViewKey);
   } catch (error) {
     failed.value = true;
     console.error(error);
@@ -365,6 +385,7 @@ onBeforeUnmount(() => {
   ready = false;
   window.removeEventListener('keydown', resetAll);
   window.removeEventListener('keydown', handleSearchKey);
+  window.removeEventListener('keydown', handleViewKey);
   if (chart.value) {
     chart.value.removeEventListener('dblclick', handleDblClick);
     chart.value.removeEventListener('contextmenu', handleContextMenu);
@@ -397,7 +418,7 @@ onBeforeUnmount(() => {
       </div>
     </section>
     </div>
-    <p class="usage-help"><span>/ Search · Double-click Center · Right-click Hide · R Reset</span></p>
+    <p class="usage-help"><span>/ Search · Double-click Center · Right-click Hide · R Reset</span><span>1 Intelligence/Time · 2 Cost/Time · 3 Intelligence/Cost · 4 3D</span></p>
     <div id="chart" :ref="el => chart = el" aria-label="X: Intelligence Index; Y: Cost per Task (USD); Z: Time per Task (min)" />
     <div v-if="hiddenCount > 0" id="reset-tip" @click="resetAll">
       {{ hiddenCount }} models hidden · <span class="action">Press R or click to reset</span>
