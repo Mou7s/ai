@@ -168,14 +168,25 @@ async function handleViewKey(event) {
   if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
   if (!ready || !chart.value) return;
   event.preventDefault();
+  clearHover();
   currentView.value = event.key;
-  hoveredModelId = null;
-  hoveredPoint = null;
   await Plotly.react(chart.value, createTraces(), getLayout(true), config).catch(console.error);
+  clearHover();
 }
 let ready = false;
 let hoveredModelId = null;
 let hoveredPoint = null;
+
+function clearHover() {
+  // Clear Plotly's rendered tooltip before replacing a 2D/3D trace.
+  if (chart.value) {
+    Plotly.Fx.unhover(chart.value);
+    // Fx.unhover handles Cartesian plots; gl3d owns a separate SVG layer.
+    chart.value.querySelectorAll('.hovertext').forEach(label => label.remove());
+  }
+  hoveredModelId = null;
+  hoveredPoint = null;
+}
 
 const hiddenIds = ref(getStoredHiddenIds());
 const hiddenCount = computed(() => hiddenIds.value.size);
@@ -247,9 +258,8 @@ function createTraces() {
         line: { color: palette().bg, width: 0.6 }
       },
       hovertemplate:
-        '<b>%{text}</b><br>Intelligence Index: %{x:.2f}<br>Cost per Task: $%{y:.4f}<br>Time per Task: %{z:.2f} min<br>Release date: %{hovertext}<br><span style="color:#94a3b8;font-size:11px;">Double-click to center · Right-click to hide</span><extra>' +
-        escape(provider) +
-        '</extra>'
+        '<b>%{text}</b><br>Provider: ' + escape(provider) +
+        '<br>Intelligence Index: %{x:.2f}<br>Cost per Task: $%{y:.4f}<br>Time per Task: %{z:.2f} min<br>Release date: %{hovertext}<br><span style="color:#94a3b8;font-size:11px;">Double-click to center · Right-click to hide</span><extra></extra>'
     };
   }).map(trace => {
     if (currentView.value === '4') return trace;
@@ -266,7 +276,7 @@ function createTraces() {
         const model = models.find(model => model.id === id);
         return `<b>${escape(model.name)}</b><br>Intelligence Index: ${model.intelligence.toFixed(2)}<br>Cost per Task: $${model.cost.toFixed(4)}<br>Time per Task: ${(model.timeSeconds / 60).toFixed(2)} min<br>Release date: ${formatReleaseDate(model.releaseDate)}`;
       }),
-      hovertemplate: '%{hovertext}<extra>' + escape(trace.name) + '</extra>'
+      hovertemplate: '%{hovertext}<br>Provider: ' + escape(trace.name) + '<extra></extra>'
     };
   });
   if (currentView.value === '4') traces.push({
@@ -338,9 +348,9 @@ async function hideModel(id) {
   if (!id || !ready || !chart.value) return;
   hiddenIds.value = new Set([...hiddenIds.value, id]);
   saveStoredHiddenIds(hiddenIds.value);
-  hoveredModelId = null;
-  hoveredPoint = null;
+  clearHover();
   await Plotly.react(chart.value, createTraces(), getLayout(false), config).catch(console.error);
+  clearHover();
 }
 
 function centerOnPoint(pt) {
@@ -393,11 +403,11 @@ async function resetView(event) {
   }
   if (!ready || !chart.value) return;
 
-  hoveredModelId = null;
-  hoveredPoint = null;
+  clearHover();
 
   await Plotly.react(chart.value, createTraces(), getLayout(true), config).catch(console.error);
-  if (currentView.value === '4') Plotly.relayout(chart.value, { 'scene.camera': initialCamera() }).catch(console.error);
+  if (currentView.value === '4') await Plotly.relayout(chart.value, { 'scene.camera': initialCamera() }).catch(console.error);
+  clearHover();
 }
 
 async function resetAll() {
