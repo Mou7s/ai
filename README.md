@@ -14,7 +14,7 @@ Live site: [ai.mou7s.com](https://ai.mou7s.com)
 - Right-click a point to hide it for the current browser session. Searching for a hidden model and selecting it restores it.
 - Press R to reset the current view while keeping hidden models hidden. Click the hidden-model notice to show all models and reset the view. Shortcuts do not interrupt typing in the search field.
 
-Axes use muted blue (intelligence), green (cost), and purple (time). Bounds start at zero and end on regular ticks. The **Ideal corner** marks the direction of higher intelligence, lower cost, and less time; it is not a combined model ranking.
+Axes use muted blue (intelligence), green (cost), and purple (time). Bounds start at zero and end on regular ticks. A small target (a thin ring and center dot) marks the ideal corner for higher intelligence, lower cost, and less time, without a text label or background; it is not a combined model ranking.
 
 ## Data
 

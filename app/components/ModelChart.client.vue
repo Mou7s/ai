@@ -27,13 +27,12 @@ async function applySystemTheme() {
     patch[axis + '.title.font.color'] = color;
     if (currentView.value === '4') patch[axis + '.color'] = color;
   }
-  if (currentView.value === '4') {
-    patch['scene.annotations[0].font.color'] = p.muted;
-    patch['scene.annotations[0].bgcolor'] = p.panel;
-  }
   // Update presentation only: retain camera, axis ranges, and hidden models.
   await Plotly.relayout(chart.value, patch);
   await Plotly.restyle(chart.value, { 'marker.line.color': p.bg });
+  if (currentView.value === '4') {
+    await Plotly.restyle(chart.value, { 'marker.color': p.muted, 'marker.line.color': p.muted }, [chart.value.data.length - 1]);
+  }
 }
 
 const STORAGE_KEY = 'ai_model_chart_hidden_ids';
@@ -229,7 +228,7 @@ const axis = (title, range, color, hideZero = false, prefix = '') => {
 
 function createTraces() {
   const currentHidden = hiddenIds.value;
-  return providers.map(provider => {
+  const traces = providers.map(provider => {
     const group = models.filter(m => m.creator === provider && !currentHidden.has(m.id));
     return {
       type: 'scatter3d',
@@ -257,6 +256,8 @@ function createTraces() {
     const original = { x: trace.x, y: trace.y, z: trace.z };
     return {
       ...trace, type: 'scatter',
+      // Let markers at zero extend past the plot edge instead of clipping circles.
+      cliponaxis: false,
       x: currentView.value === '2' ? original.y : original.x,
       y: currentView.value === '3' ? original.y : original.z,
       z: undefined,
@@ -268,6 +269,22 @@ function createTraces() {
       hovertemplate: '%{hovertext}<extra>' + escape(trace.name) + '</extra>'
     };
   });
+  if (currentView.value === '4') traces.push({
+    type: 'scatter3d',
+    mode: 'markers',
+    x: [modelRange('intelligence')[1], modelRange('intelligence')[1]],
+    y: [0, 0],
+    z: [0, 0],
+    marker: {
+      symbol: ['circle-open', 'circle'],
+      size: [4, 1.2],
+      color: palette().muted,
+      line: { color: palette().muted, width: 1 }
+    },
+    hoverinfo: 'skip',
+    showlegend: false
+  });
+  return traces;
 }
 
 const config = { responsive: true, displayModeBar: false, scrollZoom: true, doubleClick: false };
@@ -309,22 +326,6 @@ const getLayout = (resetCamera = false) => currentView.value !== '4' ? getPlaneL
     xaxis: { ...axis('X · Intelligence Index', modelRange('intelligence'), palette().ability), visible: planeViews[currentView.value]?.hidden !== 'xaxis' },
     yaxis: { ...axis('Y · Cost per Task (USD)', modelRange('cost'), palette().cost, true, '$'), visible: planeViews[currentView.value]?.hidden !== 'yaxis' },
     zaxis: { ...axis('Z · Time per Task (min)', modelRange('timeSeconds', 60), palette().time, true), visible: planeViews[currentView.value]?.hidden !== 'zaxis' },
-    annotations: [{
-      x: modelRange('intelligence')[1] - 0.001,
-      y: modelRange('cost')[0] + 0.001,
-      z: modelRange('timeSeconds', 60)[0] + 0.001,
-      text: '◇ Ideal corner',
-      hovertext: 'Higher intelligence · Lower cost · Less time',
-      showarrow: true,
-      arrowhead: 0,
-      arrowcolor: '#94a3b8',
-      arrowwidth: 1,
-      ax: 0,
-      ay: 32,
-      font: { size: 11, color: palette().muted },
-      bgcolor: palette().panel,
-      borderpad: 4
-    }],
     aspectmode: currentView.value === '4' ? 'cube' : 'manual',
 
     camera: resetCamera ? viewCamera() : structuredClone(chart.value?._fullLayout?.scene?.camera ?? viewCamera()),
