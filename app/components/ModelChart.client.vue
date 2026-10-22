@@ -64,6 +64,13 @@ function clearStoredHiddenIds() {
 
 const chart = ref(null);
 const failed = ref(false);
+const updatedAt = ref(data.retrievedAt);
+const updatedAtLabel = computed(() => {
+  const date = new Date(updatedAt.value);
+  return Number.isFinite(date.getTime())
+    ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
+    : '未知';
+});
 const searchQuery = ref('');
 const searchOpen = ref(false);
 const searchInput = ref(null);
@@ -444,6 +451,7 @@ onMounted(async () => {
       const knownDates = new Map(fallbackData.models.map(model => [model.id, model.releaseDate]));
       data = { ...latest, models: latest.models.map(model => ({ ...model, releaseDate: model.releaseDate ?? knownDates.get(model.id) ?? null })) };
       searchData.value = data.models;
+      updatedAt.value = data.retrievedAt;
       models = data.models.filter(m => [m.intelligence, m.cost, m.timeSeconds].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0));
       providers = [...new Set(models.map(m => m.creator))].sort();
     } catch (error) {
@@ -532,6 +540,7 @@ onBeforeUnmount(() => {
     </section>
     </div>
     <p class="usage-help"><span>/ Search · Double-click Center · Right-click Hide · R Reset view</span><span>1, 2, 3, 4 Switch views</span></p>
+    <p class="update-time">更新时间：<time :datetime="updatedAt">{{ updatedAtLabel }}</time>（北京时间）</p>
     <div id="chart" :ref="el => chart = el" aria-label="X: Intelligence Index; Y: Cost per Task (USD); Z: Time per Task (min)" />
     <div v-if="hiddenCount > 0" id="reset-tip" @click="resetAll()">
       {{ hiddenCount }} models hidden · <span class="action">Click to show all and reset view</span>
@@ -545,6 +554,8 @@ onBeforeUnmount(() => {
 .model-search { width: min(420px, calc(100vw - 36px)); font-size: 13px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; box-shadow: 0 16px 48px #0f172a14; }
 .search-help { margin: 10px 2px 0; font-size: 11px; color: #64748b; }
 .usage-help { position: absolute; left: 18px; bottom: 14px; z-index: 10; margin: 0; max-width: calc(100vw - 36px); display: flex; flex-wrap: wrap; gap: 4px 16px; color: #7b8797; font-size: 11px; line-height: 1.7; pointer-events: none; }
+.update-time { position: absolute; right: 18px; bottom: 14px; z-index: 10; margin: 0; color: #7b8797; font-size: 11px; line-height: 1.7; pointer-events: none; }
+@media (max-width: 1000px) { .usage-help { bottom: 36px; } }
 .model-search input { box-sizing: border-box; width: 100%; padding: 10px 12px; background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; color: #334155; font: inherit; box-shadow: 0 2px 8px #0000000a; }
 .model-search input:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
 .search-results { margin-top: 6px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 8px 24px #00000014; max-height: min(420px, 65vh); overflow: auto; }
@@ -591,7 +602,7 @@ onBeforeUnmount(() => {
   .model-search, .search-results, .model-search input, .search-results button, #reset-tip {
     background: #182333; color: #dbe5f2; border-color: #40516a;
   }
-  .search-help, .search-summary, .usage-help, .result-metrics { color: #a2b1c6; }
+  .search-help, .search-summary, .usage-help, .update-time, .result-metrics { color: #a2b1c6; }
   .result-metrics b { color: #dbe5f2; }
   .search-results button.active-result, .search-results button:hover, .search-results button:focus-visible, #reset-tip:hover { background: #24374e; color: #dbe5f2; }
   .search-results button:disabled, .search-results button:disabled .result-metrics, .search-results button:disabled .result-metrics b { color: #8595aa; }
