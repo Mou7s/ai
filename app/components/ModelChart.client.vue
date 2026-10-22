@@ -68,8 +68,8 @@ const updatedAt = ref(data.retrievedAt);
 const updatedAtLabel = computed(() => {
   const date = new Date(updatedAt.value);
   return Number.isFinite(date.getTime())
-    ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
-    : '未知';
+    ? new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
+    : 'Unknown';
 });
 const searchQuery = ref('');
 const searchOpen = ref(false);
@@ -540,7 +540,7 @@ onBeforeUnmount(() => {
     </section>
     </div>
     <p class="usage-help"><span>/ Search · Double-click Center · Right-click Hide · R Reset view</span><span>1, 2, 3, 4 Switch views</span></p>
-    <p class="update-time">更新时间：<time :datetime="updatedAt">{{ updatedAtLabel }}</time>（北京时间）</p>
+    <p class="update-time">Last updated: <time :datetime="updatedAt">{{ updatedAtLabel }}</time> (UTC+8)</p>
     <div id="chart" :ref="el => chart = el" aria-label="X: Intelligence Index; Y: Cost per Task (USD); Z: Time per Task (min)" />
     <div v-if="hiddenCount > 0" id="reset-tip" @click="resetAll()">
       {{ hiddenCount }} models hidden · <span class="action">Click to show all and reset view</span>
