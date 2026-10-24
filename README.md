@@ -7,11 +7,12 @@ Live site: [ai.mou7s.com](https://ai.mou7s.com)
 ## Using the chart
 
 - Drag to rotate, scroll to zoom, and hover over a point to inspect its metrics.
+- Click a model to anchor scroll zoom to that point, even after moving the pointer away. Double-clicking or locating a search result also sets the anchor. Switching views centers on the anchored model and preserves the zoom distance. Resetting the view or hiding the anchored model restores zoom at the pointer.
 - Press `1` for intelligence/time, `2` for cost/time, `3` for intelligence/cost, and `4` to return to free 3D. Plane views use 2D axes; drag to pan and scroll to zoom at the pointer. Better values point toward the upper right.
 - Press `/` to search by model or provider. Search ignores case and splits letters from numbers, so `deep4.1` matches DeepSeek V4.1 Flash.
 - Use ↑ / ↓ to select a search result, Enter to locate it, and Esc to close search. Results show intelligence, cost, and time; unavailable metrics appear as `—` and cannot be located.
 - Double-click a point to center the camera without changing axis bounds or marker sizes.
-- Right-click a point to hide it for the current browser session. Searching for a hidden model and selecting it restores it.
+- Right-click a point to hide it. Hidden models are saved in localStorage and persist across browser sessions on the same browser and site. Searching for a hidden model and selecting it restores it.
 - Press R to reset the current view while keeping hidden models hidden. Click the hidden-model notice to show all models and reset the view. Shortcuts do not interrupt typing in the search field.
 
 Axes use muted blue (intelligence), green (cost), and purple (time). Bounds start at zero and end on regular ticks. A small target (a thin ring and center dot) marks the ideal corner for higher intelligence, lower cost, and less time, without a text label or background; it is not a combined model ranking.

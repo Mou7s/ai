@@ -35,9 +35,19 @@ async function applySystemTheme() {
 const STORAGE_KEY = 'ai_model_chart_hidden_ids';
 
 function getStoredHiddenIds() {
-  if (typeof window === 'undefined' || !window.sessionStorage) return new Set();
+  if (typeof window === 'undefined') return new Set();
   try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
+    let raw = window.localStorage.getItem(STORAGE_KEY);
+    if (raw === null) {
+      // Carry existing session preferences into persistent storage once.
+      try {
+        raw = window.sessionStorage.getItem(STORAGE_KEY);
+        if (raw !== null) {
+          window.localStorage.setItem(STORAGE_KEY, raw);
+          window.sessionStorage.removeItem(STORAGE_KEY);
+        }
+      } catch {}
+    }
     const parsed = raw ? JSON.parse(raw) : [];
     return new Set(Array.isArray(parsed) ? parsed : []);
   } catch {
@@ -46,16 +56,19 @@ function getStoredHiddenIds() {
 }
 
 function saveStoredHiddenIds(idsSet) {
-  if (typeof window === 'undefined' || !window.sessionStorage) return;
+  if (typeof window === 'undefined') return;
   try {
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify([...idsSet]));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([...idsSet]));
   } catch {}
 }
 
 function clearStoredHiddenIds() {
-  if (typeof window === 'undefined' || !window.sessionStorage) return;
+  if (typeof window === 'undefined') return;
   try {
-    sessionStorage.removeItem(STORAGE_KEY);
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {}
+  try {
+    window.sessionStorage.removeItem(STORAGE_KEY);
   } catch {}
 }
 
@@ -158,7 +171,7 @@ async function locateModel(model) {
     await Plotly.react(chart.value, createTraces(), layout, config);
     syncSceneState(savedCamera, currentView.value);
   }
-  centerOnPoint({ x: model.intelligence, y: model.cost, z: model.timeSeconds / 60 });
+  centerOnPoint({ x: model.intelligence, y: model.cost, z: model.timeSeconds / 60 }, model.id);
   closeSearch();
 }
 
@@ -500,6 +513,18 @@ async function switchToView(targetView) {
   const previousView = currentView.value;
   currentView.value = targetView;
   const targetCam = viewCamera(targetView);
+  const fixedModel = models.find(model => model.id === fixedModelId && !hiddenIds.value.has(model.id));
+  if (fixedModel) {
+    const center = pointToScene({ x: fixedModel.intelligence, y: fixedModel.cost, z: fixedModel.timeSeconds / 60 });
+    const camera = getLiveCamera();
+    const radius = Math.hypot(...vecSub(camera.eye, camera.center));
+    const direction = vecSub(targetCam.eye, targetCam.center);
+    const length = Math.hypot(...direction);
+    targetCam.center = center;
+    targetCam.eye = Object.fromEntries(['x', 'y', 'z'].map((key, index) => [
+      key, center[key] + direction[index] / length * radius
+    ]));
+  }
   const targetOrtho = targetView === '4' ? 0 : 1;
 
   // Show all 3 axes during rotation so the 3D cube frame is visible while turning.
@@ -527,6 +552,7 @@ async function handleViewKey(event) {
 let ready = false;
 let hoveredModelId = null;
 let hoveredPoint = null;
+let fixedModelId = null;
 
 function clearHover() {
   // Clear Plotly's rendered tooltip.
@@ -656,6 +682,7 @@ async function hideModel(id) {
   cancelCameraAnimation();
   const savedCamera = getLiveCamera();
   hiddenIds.value = new Set([...hiddenIds.value, id]);
+  if (fixedModelId === id) fixedModelId = null;
   saveStoredHiddenIds(hiddenIds.value);
   clearHover();
   const layout = getLayout(false);
@@ -680,10 +707,11 @@ function pointToScene(pt) {
   };
 }
 
-function centerOnPoint(pt) {
+function centerOnPoint(pt, modelId) {
   if (!pt || !ready || !chart.value) return;
   const center = pointToScene(pt);
   if (!Object.values(center).every(Number.isFinite)) return;
+  fixedModelId = modelId ?? null;
 
   const camera = getLiveCamera();
   const previousCenter = camera.center || { x: 0, y: 0, z: 0 };
@@ -722,6 +750,19 @@ function handleWheel(event) {
   const d = Math.hypot(...v) || 1.95;
   const dNew = Math.max(0.15, Math.min(12, d * zoomFactor));
   const s = dNew / d;
+
+  const fixedModel = models.find(model => model.id === fixedModelId && !hiddenIds.value.has(model.id));
+  if (fixedModel) {
+    const anchor = pointToScene({ x: fixedModel.intelligence, y: fixedModel.cost, z: fixedModel.timeSeconds / 60 });
+    // Scale both camera positions around the model so its screen position stays fixed.
+    const scalePosition = position => Object.fromEntries(['x', 'y', 'z'].map(key => [
+      key, anchor[key] + (position[key] - anchor[key]) * s
+    ]));
+    const nextCam = { ...cam, center: scalePosition(cam.center), eye: scalePosition(cam.eye) };
+    applyLiveCamera(nextCam, orthoBlend);
+    syncSceneState(nextCam);
+    return;
+  }
 
   const b = [v[0] / d, v[1] / d, v[2] / d];
   const u = orthoUp([cam.up.x, cam.up.y, cam.up.z], b);
@@ -774,12 +815,14 @@ async function resetView(event) {
   }
   if (!ready || !chart.value) return;
 
+  fixedModelId = null;
   clearHover();
   await switchToView(currentView.value);
 }
 
 async function resetAll() {
   if (!ready || !chart.value) return;
+  fixedModelId = null;
   cancelCameraAnimation();
   const currentCam = getLiveCamera();
   hiddenIds.value = new Set();
@@ -802,7 +845,7 @@ function handleContextMenu(event) {
 function handleDblClick(event) {
   if (event) event.preventDefault();
   if (hoveredPoint) {
-    centerOnPoint(hoveredPoint);
+    centerOnPoint(hoveredPoint, hoveredModelId);
   }
 }
 
@@ -848,6 +891,7 @@ onMounted(async () => {
         const p = eventData.points[0];
         hoveredModelId = p.customdata;
         const model = models.find(model => model.id === p.customdata);
+        fixedModelId = model?.id ?? null;
         hoveredPoint = model ? { x: model.intelligence, y: model.cost, z: model.timeSeconds / 60 } : null;
       }
     });
