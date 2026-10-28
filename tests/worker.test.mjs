@@ -32,3 +32,39 @@ test('failed source fetch never overwrites last good snapshot; valid data is pub
     assert.equal(JSON.parse(writes[0][1]).models[1].releaseDate, '2026-10-02');
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('/api/chat injects matched model data into Cloudflare Workers AI prompt', async () => {
+  let capturedModel = null;
+  let capturedInput = null;
+  const env = {
+    MODEL_DATA: {
+      get: async () => JSON.stringify({
+        retrievedAt: '2026-10-28T00:00:00.000Z',
+        models: [
+          { id: '1', name: 'Alpha-1', creator: 'OpenAI', intelligence: 45.5, cost: 1.2, timeSeconds: 30, openWeights: false, releaseDate: '2026-09-01' },
+          { id: '2', name: 'Beta-2', creator: 'Anthropic', intelligence: 42.0, cost: 0.5, timeSeconds: 15, openWeights: true, releaseDate: '2026-09-15' }
+        ]
+      })
+    },
+    AI: {
+      run: async (model, input) => {
+        capturedModel = model;
+        capturedInput = input;
+        return { response: 'Alpha-1 has higher intelligence while Beta-2 is cheaper and faster.' };
+      }
+    }
+  };
+
+  const req = new Request('https://example.com/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'compare Alpha-1 and Beta-2' }] })
+  });
+  const res = await worker.fetch(req, env);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.reply, 'Alpha-1 has higher intelligence while Beta-2 is cheaper and faster.');
+  assert.ok(capturedModel.startsWith('@cf/'));
+  assert.ok(capturedInput.messages[0].content.includes('Alpha-1'));
+  assert.ok(capturedInput.messages[0].content.includes('Beta-2'));
+});

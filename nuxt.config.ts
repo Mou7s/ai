@@ -11,5 +11,9 @@ export default defineNuxtConfig({
       { name: 'theme-color', content: '#ffffff' },
       { name: 'description', content: 'Explore AI models by Intelligence Index, Cost per Task, and Time per Task.' },
     ],
+    link: [
+      { rel: 'icon', href: '/favicon.ico', sizes: 'any' },
+      { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' },
+    ],
   } },
 });

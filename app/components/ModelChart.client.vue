@@ -84,13 +84,72 @@ const updatedAtLabel = computed(() => {
 const searchQuery = ref('');
 const searchOpen = ref(false);
 const searchInput = ref(null);
+const chatMessages = ref([]);
+const chatLoading = ref(false);
+const chatError = ref('');
+const chatThread = ref(null);
+let chatAbort = null;
 let searchReturnFocus = null;
 function closeSearch() {
   searchOpen.value = false;
   searchQuery.value = '';
+  chatError.value = '';
+  chatAbort?.abort();
+  chatAbort = null;
+  chatLoading.value = false;
   searchReturnFocus?.focus();
 }
+function clearChat() {
+  chatAbort?.abort();
+  chatAbort = null;
+  chatLoading.value = false;
+  chatMessages.value = [];
+  chatError.value = '';
+  searchInput.value?.focus();
+}
+async function askAi(promptText = searchQuery.value) {
+  const content = promptText.trim();
+  if (!content || chatLoading.value) return;
+  chatError.value = '';
+  chatMessages.value.push({ role: 'user', content });
+  searchQuery.value = '';
+  chatLoading.value = true;
+  await nextTick();
+  if (chatThread.value) chatThread.value.scrollTop = chatThread.value.scrollHeight;
+
+  chatAbort?.abort();
+  const controller = new AbortController();
+  chatAbort = controller;
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chatMessages.value }),
+      signal: controller.signal
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || `AI request failed (HTTP ${response.status})`);
+    }
+    chatMessages.value.push({ role: 'assistant', content: payload.reply || 'No response received.' });
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      chatError.value = error?.message || 'Unable to reach Cloudflare Workers AI.';
+    }
+  } finally {
+    if (chatAbort === controller) {
+      chatLoading.value = false;
+      chatAbort = null;
+    }
+    await nextTick();
+    if (chatThread.value) chatThread.value.scrollTop = chatThread.value.scrollHeight;
+    searchInput.value?.focus();
+  }
+}
 function trapSearchFocus(event) {
+  if (searchQuery.value.trim() && !event.shiftKey && event.target === searchInput.value) {
+    return;
+  }
   const controls = [...event.currentTarget.querySelectorAll('input, button:not(:disabled)')];
   const first = controls[0];
   const last = controls.at(-1);
@@ -127,25 +186,46 @@ const searchResults = computed(() => {
 });
 const activeResult = ref(-1);
 watch(searchResults, results => {
-  activeResult.value = results.findIndex(canPlot);
+  if (!searchQuery.value.trim()) {
+    activeResult.value = -1;
+    return;
+  }
+  const firstPlottable = results.findIndex(canPlot);
+  activeResult.value = firstPlottable >= 0 ? firstPlottable : results.length;
 });
 async function handleResultKey(event) {
-  if (event.isComposing || !['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
+  if (event.isComposing) return;
+  if (event.key === 'Tab' && !event.shiftKey && searchQuery.value.trim() && event.target === searchInput.value) {
+    event.preventDefault();
+    await askAi();
+    return;
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
   // Native Enter already activates focused result buttons.
   if (event.key === 'Enter' && event.target instanceof HTMLButtonElement) return;
+  if (!searchQuery.value.trim()) return;
   event.preventDefault();
-  const available = searchResults.value.map((model, index) => canPlot(model) ? index : -1).filter(index => index >= 0);
-  if (!available.length || !ready) return;
+  const askIndex = searchResults.value.length;
+  const available = [
+    ...searchResults.value.map((model, index) => canPlot(model) ? index : -1).filter(index => index >= 0),
+    askIndex
+  ];
+  if (!available.length) return;
   if (event.key === 'Enter') {
+    if (activeResult.value === askIndex || !available.includes(activeResult.value)) {
+      await askAi();
+      return;
+    }
     const model = searchResults.value[activeResult.value];
-    if (model && canPlot(model)) await locateModel(model);
+    if (model && canPlot(model) && ready) await locateModel(model);
     return;
   }
   const current = available.indexOf(activeResult.value);
   const direction = event.key === 'ArrowDown' ? 1 : -1;
   activeResult.value = available[(current + direction + available.length) % available.length];
   await nextTick();
-  document.getElementById(`model-result-${activeResult.value}`)?.scrollIntoView({ block: 'nearest' });
+  const targetId = activeResult.value === askIndex ? 'model-result-ask-ai' : `model-result-${activeResult.value}`;
+  document.getElementById(targetId)?.scrollIntoView({ block: 'nearest' });
 }
 const canPlot = model => [model.intelligence, model.cost, model.timeSeconds]
   .every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
@@ -933,11 +1013,17 @@ onBeforeUnmount(() => {
 <template>
   <main aria-label="AI Model 3D Chart">
     <div v-if="searchOpen" class="search-overlay" @click.self="closeSearch">
-    <section class="model-search" role="dialog" aria-modal="true" aria-label="Model search" @keydown.tab="trapSearchFocus" @keydown="handleResultKey">
-      <input ref="searchInput" v-model="searchQuery" type="search" aria-label="Search models" placeholder="Search models, e.g. 6.1 sol high" autocomplete="off" aria-controls="model-search-results" :aria-activedescendant="activeResult >= 0 ? `model-result-${activeResult}` : undefined" />
-      <p class="search-help">↑↓ Select · Enter Locate · Esc Close</p>
+    <section class="model-search" :class="{ 'has-chat': chatMessages.length || chatLoading || chatError }" role="dialog" aria-modal="true" aria-label="Model search and AI chat" @keydown.tab="trapSearchFocus" @keydown="handleResultKey">
+      <div class="search-input-row">
+        <input ref="searchInput" v-model="searchQuery" type="search" aria-label="Search models or ask AI" :placeholder="chatMessages.length ? 'Ask a follow-up or search models...' : 'Search models or ask AI, e.g. compare GPT-6 and Claude'" autocomplete="off" aria-controls="model-search-results" :aria-activedescendant="activeResult >= 0 ? (activeResult === searchResults.length ? 'model-result-ask-ai' : `model-result-${activeResult}`) : undefined" />
+        <button v-if="searchQuery.trim()" type="button" class="ask-ai-pill" :disabled="chatLoading" @click="askAi()">Ask AI ↵</button>
+      </div>
+      <div class="search-help-row">
+        <p class="search-help">↑↓ Select · Enter Locate/Ask · Tab Ask AI · Esc Close</p>
+        <button v-if="chatMessages.length" type="button" class="clear-chat-btn" @click="clearChat">Clear chat</button>
+      </div>
       <div v-if="searchQuery.trim()" class="search-results" aria-live="polite">
-        <p class="search-summary">{{ searchResults.length ? `${searchResults.length} models found` : 'No matching models' }}</p>
+        <p class="search-summary">{{ searchResults.length ? `${searchResults.length} models found` : 'No matching models · Press Enter to ask AI' }}</p>
         <ul id="model-search-results">
           <li v-for="(model, index) in searchResults" :key="model.id">
             <button :id="`model-result-${index}`" type="button" :class="{ 'active-result': activeResult === index }" @focus="activeResult = index" @mouseenter="canPlot(model) && (activeResult = index)" :disabled="!ready || !canPlot(model)" @click="locateModel(model)">
@@ -951,7 +1037,24 @@ onBeforeUnmount(() => {
               <small>{{ model.creator }} · {{ canPlot(model) ? (hiddenIds.has(model.id) ? 'Show and locate' : 'Locate in chart') : `Missing ${missingMetrics(model)}; cannot locate` }}</small>
             </button>
           </li>
+          <li>
+            <button id="model-result-ask-ai" type="button" class="ask-ai-item" :class="{ 'active-result': activeResult === searchResults.length }" :disabled="chatLoading" @focus="activeResult = searchResults.length" @mouseenter="activeResult = searchResults.length" @click="askAi()">
+              <strong>✨ Ask AI: "{{ searchQuery.trim() }}"</strong>
+              <small>Compare models or analyze leaderboard data with Cloudflare Workers AI (Tab or Enter)</small>
+            </button>
+          </li>
         </ul>
+      </div>
+      <div v-if="chatMessages.length || chatLoading || chatError" ref="chatThread" class="chat-thread" aria-live="polite">
+        <div v-for="(msg, idx) in chatMessages" :key="idx" class="chat-msg" :class="`chat-msg-${msg.role}`">
+          <span class="chat-role">{{ msg.role === 'user' ? 'You' : 'Cloudflare AI' }}</span>
+          <div class="chat-bubble">{{ msg.content }}</div>
+        </div>
+        <div v-if="chatLoading" class="chat-msg chat-msg-assistant">
+          <span class="chat-role">Cloudflare AI</span>
+          <div class="chat-bubble chat-thinking">Analyzing leaderboard data…</div>
+        </div>
+        <p v-if="chatError" class="chat-error" role="alert">{{ chatError }}</p>
       </div>
     </section>
     </div>
@@ -966,25 +1069,44 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.search-overlay { position: fixed; inset: 0; z-index: 20; background: #ffffff66; display: flex; justify-content: center; align-items: flex-start; padding-top: min(18vh, 120px); }
-.model-search { width: min(420px, calc(100vw - 36px)); font-size: 13px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; box-shadow: 0 16px 48px #0f172a14; }
-.search-help { margin: 10px 2px 0; font-size: 11px; color: #64748b; }
+.search-overlay { position: fixed; inset: 0; z-index: 20; background: #ffffff66; display: flex; justify-content: center; align-items: flex-start; padding-top: min(14vh, 100px); }
+.model-search { width: min(460px, calc(100vw - 36px)); font-size: 13px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; box-shadow: 0 16px 48px #0f172a14; transition: width 0.18s ease; }
+.model-search.has-chat { width: min(560px, calc(100vw - 36px)); }
+.search-input-row { position: relative; display: flex; align-items: center; }
+.search-help-row { display: flex; justify-content: space-between; align-items: center; margin: 8px 2px 0; }
+.search-help { margin: 0; font-size: 11px; color: #64748b; }
+.clear-chat-btn { border: 0; background: none; padding: 2px 6px; font: inherit; font-size: 11px; color: #2563eb; cursor: pointer; border-radius: 4px; }
+.clear-chat-btn:hover { background: #eff6ff; }
 .usage-help { position: absolute; left: 18px; bottom: 14px; z-index: 10; margin: 0; max-width: calc(100vw - 36px); display: flex; flex-wrap: wrap; gap: 4px 16px; color: #7b8797; font-size: 11px; line-height: 1.7; pointer-events: none; }
 .update-time { position: absolute; right: 18px; bottom: 14px; z-index: 10; margin: 0; color: #7b8797; font-size: 11px; line-height: 1.7; pointer-events: none; }
 @media (max-width: 1000px) { .usage-help { bottom: 36px; } }
-.model-search input { box-sizing: border-box; width: 100%; padding: 10px 12px; background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; color: #334155; font: inherit; box-shadow: 0 2px 8px #0000000a; }
+.model-search input { box-sizing: border-box; width: 100%; padding: 10px 84px 10px 12px; background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; color: #334155; font: inherit; box-shadow: 0 2px 8px #0000000a; }
 .model-search input:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
-.search-results { margin-top: 6px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 8px 24px #00000014; max-height: min(420px, 65vh); overflow: auto; }
+.ask-ai-pill { position: absolute; right: 6px; padding: 5px 10px; border: 1px solid #bfdbfe; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font: inherit; font-size: 11px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+.ask-ai-pill:hover:not(:disabled) { background: #dbeafe; }
+.ask-ai-pill:disabled { opacity: 0.5; cursor: default; }
+.search-results { margin-top: 6px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 8px 24px #00000014; max-height: min(320px, 45vh); overflow: auto; }
 .search-summary { margin: 0; padding: 10px 12px; color: #64748b; }
 .search-results ul { list-style: none; margin: 0; padding: 0; }
 .search-results button { display: block; width: 100%; padding: 10px 12px; border: 0; border-top: 1px solid #f1f5f9; background: white; text-align: left; cursor: pointer; color: #334155; font: inherit; }
 .search-results button.active-result, .search-results button:hover, .search-results button:focus-visible { background: #eff6ff; }
+.search-results button.ask-ai-item strong { color: #1d4ed8; }
 .search-results button:disabled { color: #94a3b8; cursor: default; }
 .search-results strong, .search-results small { display: block; }
 .result-metrics { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 7px; color: #64748b; font-size: 11px; font-variant-numeric: tabular-nums; }
 .result-metrics b { font-weight: 500; color: #475569; }
 .search-results button:disabled .result-metrics, .search-results button:disabled .result-metrics b { color: #94a3b8; }
 .search-results small { margin-top: 4px; font-size: 11px; }
+.chat-thread { margin-top: 8px; padding: 10px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; max-height: min(380px, 52vh); overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.chat-msg { display: flex; flex-direction: column; gap: 3px; }
+.chat-msg-user { align-items: flex-end; }
+.chat-msg-assistant { align-items: flex-start; }
+.chat-role { font-size: 10px; color: #64748b; padding: 0 4px; }
+.chat-bubble { max-width: 92%; padding: 8px 11px; border-radius: 8px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; }
+.chat-msg-user .chat-bubble { background: #2563eb; color: #fff; border-bottom-right-radius: 2px; }
+.chat-msg-assistant .chat-bubble { background: #fff; color: #1e293b; border: 1px solid #e2e8f0; border-bottom-left-radius: 2px; }
+.chat-thinking { color: #64748b; font-style: italic; }
+.chat-error { margin: 2px 0 0; padding: 8px 10px; border-radius: 6px; background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; font-size: 12px; }
 
 #reset-tip {
   position: absolute;
@@ -1018,9 +1140,16 @@ onBeforeUnmount(() => {
   .model-search, .search-results, .model-search input, .search-results button, #reset-tip {
     background: #182333; color: #dbe5f2; border-color: #40516a;
   }
-  .search-help, .search-summary, .usage-help, .update-time, .result-metrics { color: #a2b1c6; }
+  .search-help, .search-summary, .usage-help, .update-time, .result-metrics, .chat-role, .chat-thinking { color: #a2b1c6; }
   .result-metrics b { color: #dbe5f2; }
   .search-results button.active-result, .search-results button:hover, .search-results button:focus-visible, #reset-tip:hover { background: #24374e; color: #dbe5f2; }
+  .search-results button.ask-ai-item strong, .clear-chat-btn { color: #93c5fd; }
+  .clear-chat-btn:hover { background: #24374e; }
+  .ask-ai-pill { background: #24374e; border-color: #3b82f6; color: #93c5fd; }
+  .ask-ai-pill:hover:not(:disabled) { background: #1e3a5f; }
+  .chat-thread { background: #101722; border-color: #40516a; }
+  .chat-msg-assistant .chat-bubble { background: #182333; color: #dbe5f2; border-color: #40516a; }
+  .chat-error { background: #3b181e; border-color: #7f1d1d; color: #fca5a5; }
   .search-results button:disabled, .search-results button:disabled .result-metrics, .search-results button:disabled .result-metrics b { color: #8595aa; }
   #reset-tip .action { color: #93c5fd; }
 }
