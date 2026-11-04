@@ -8,7 +8,8 @@
     "build": "bun --bun nuxt generate",
     "preview": "bun --bun nuxt preview",
     "deploy": "bun run build && wrangler deploy",
-    "refresh-data": "node --use-env-proxy scripts/refresh-data.mjs",
+    "test": "bun test",
+    "refresh-data": "bun scripts/refresh-data.mjs",
     "check": "bun scripts/check-data.mjs",
     "postinstall": "bun --bun nuxt prepare"
   },

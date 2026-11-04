@@ -19,13 +19,13 @@ Axes use muted blue (intelligence), green (cost), and purple (time). Bounds star
 
 ## Data
 
-Source: [Artificial Analysis](https://artificialanalysis.ai/models/). The checked-in snapshot contains 715 models and reasoning variants, of which 71 have all three required metrics. Missing values are never replaced with zero. Snapshot timestamps and original precision are retained in `src/data.json`; the live snapshot can differ after scheduled updates.
+Source: [Artificial Analysis](https://artificialanalysis.ai/models/). The checked-in snapshot contains 723 models and reasoning variants, of which 86 have all three required metrics. Missing values are never replaced with zero. Snapshot timestamps and original precision are retained in `src/data.json`; the live snapshot can differ after scheduled updates.
 
 Cost comes from `intelligenceIndexCostPerTask.cost.total`; time comes from `intelligenceIndexTimePerTask` in seconds and is converted to minutes for display. Time measures weighted decoding time, excluding TTFT and other overhead. See the [source methodology](https://artificialanalysis.ai/methodology).
 
 ## Local development
 
-Nuxt 4, Vue 3, and Plotly, with Bun 1.4.3 for dependencies, development, and static generation. Node.js >= 24.5 is required for the data refresh script and deployment tooling.
+Nuxt 4, Vue 3, and Plotly, with Bun 1.4.3 for dependencies, development, testing, and static generation.
 
 ```sh
 bun install --frozen-lockfile
@@ -67,13 +67,13 @@ bun run refresh-data
 bun run check
 ```
 
-The refresh script uses Node's `--use-env-proxy`, reads public source data, and needs no source API key. There is no minimum count of models with complete metrics; source benchmark updates can reduce metric coverage. Source format changes, fewer than 100 total models, or duplicate IDs cause it to fail without replacing the snapshot.
+The refresh script reads public source data with proxy support from standard environment variables (`HTTP_PROXY`, `HTTPS_PROXY`), and needs no source API key. There is no minimum count of models with complete metrics; source benchmark updates can reduce metric coverage. Source format changes, fewer than 100 total models, or duplicate IDs cause it to fail without replacing the snapshot.
 
 ## Validation
 
 ```sh
 bun run check
-node --test tests/worker.test.mjs
+bun test
 bun run build
 bunx wrangler deploy --dry-run
 ```

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { refresh } from '../worker/index.mjs';
+import { extract } from '../lib/model-data.mjs';
 
 test('API serves stored snapshot and falls back when KV is unavailable', async () => {
   const request = new Request('https://example.com/api/data');
@@ -70,4 +71,13 @@ test('/api/chat injects matched model data into Cloudflare Workers AI prompt', a
   assert.ok(capturedModel.startsWith('@cf/'));
   assert.ok(capturedInput.messages[0].content.includes('Alpha-1'));
   assert.ok(capturedInput.messages[0].content.includes('Beta-2'));
+});
+
+test('extract handles manifest objects regardless of key order', () => {
+  const flightReversed = '"manifest":{"key":"abc12345","path":"/data/sample.txt"}';
+  const html = `self.__next_f.push([1,${JSON.stringify(flightReversed)}])`;
+  const result = extract(html);
+  assert.equal(result.manifests?.length, 1);
+  assert.equal(result.manifests[0].path, '/data/sample.txt');
+  assert.equal(result.manifests[0].key, 'abc12345');
 });
