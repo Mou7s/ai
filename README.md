@@ -19,7 +19,7 @@ Axes use muted blue (intelligence), green (cost), and purple (time). Bounds star
 
 ## Data
 
-Source: [Artificial Analysis](https://artificialanalysis.ai/models/). The checked-in snapshot contains 704 models and reasoning variants, of which 187 have all three required metrics. Missing values are never replaced with zero. Snapshot timestamps and original precision are retained in `src/data.json`; the live snapshot can differ after scheduled updates.
+Source: [Artificial Analysis](https://artificialanalysis.ai/models/). The checked-in snapshot contains 715 models and reasoning variants, of which 71 have all three required metrics. Missing values are never replaced with zero. Snapshot timestamps and original precision are retained in `src/data.json`; the live snapshot can differ after scheduled updates.
 
 Cost comes from `intelligenceIndexCostPerTask.cost.total`; time comes from `intelligenceIndexTimePerTask` in seconds and is converted to minutes for display. Time measures weighted decoding time, excluding TTFT and other overhead. See the [source methodology](https://artificialanalysis.ai/methodology).
 
@@ -67,7 +67,7 @@ bun run refresh-data
 bun run check
 ```
 
-The refresh script uses Node's `--use-env-proxy`, reads public source data, and needs no source API key. Source format changes or insufficient valid data cause it to fail without replacing the snapshot.
+The refresh script uses Node's `--use-env-proxy`, reads public source data, and needs no source API key. There is no minimum count of models with complete metrics; source benchmark updates can reduce metric coverage. Source format changes, fewer than 100 total models, or duplicate IDs cause it to fail without replacing the snapshot.
 
 ## Validation
 
