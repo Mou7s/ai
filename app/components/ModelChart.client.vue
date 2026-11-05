@@ -1,22 +1,48 @@
 <script setup>
 import Plotly from 'plotly.js-dist-min';
 import fallbackData from '../../src/data.json';
-let data = fallbackData;
 import { onMounted, onBeforeUnmount, nextTick, ref, computed, watch } from 'vue';
+import {
+  getStoredHiddenIds,
+  saveStoredHiddenIds,
+  clearStoredHiddenIds,
+  canPlot,
+  formatMetric,
+  formatReleaseDate,
+  missingMetrics,
+  computeParetoIds,
+  linkifyModelsInText
+} from '../utils/chartFilters';
+import {
+  initialCamera,
+  planeViews,
+  viewCamera,
+  vecSub,
+  vecDot,
+  vecCross,
+  orthoUp,
+  interpolateCamera
+} from '../utils/chartCamera';
 
-
+let data = fallbackData;
 let themeMedia = null;
+
 function palette() {
   const dark = themeMedia?.matches ?? window.matchMedia('(prefers-color-scheme: dark)').matches;
   return dark
     ? { bg: '#101722', text: '#dbe5f2', grid: '#29394e', border: '#40516a', muted: '#a2b1c6', panel: '#182333', ability: '#9db9e5', cost: '#9ac8ae', time: '#c3a7e8' }
     : { bg: '#ffffff', text: '#465366', grid: '#e0e6ee', border: '#cbd5e1', muted: '#64748b', panel: '#ffffff', ability: '#7b9bc9', cost: '#7ba58b', time: '#a18bc5' };
 }
+
 async function applySystemTheme() {
   if (!ready || !chart.value) return;
   const p = palette();
-  const patch = { paper_bgcolor: p.bg, plot_bgcolor: p.bg, 'font.color': p.text,
-    hoverlabel: { bgcolor: p.panel, bordercolor: p.border, font: { color: p.text, size: 12 } } };
+  const patch = {
+    paper_bgcolor: p.bg,
+    plot_bgcolor: p.bg,
+    'font.color': p.text,
+    hoverlabel: { bgcolor: p.panel, bordercolor: p.border, font: { color: p.text, size: 12 } }
+  };
   const axes = [['scene.xaxis', p.ability], ['scene.yaxis', p.cost], ['scene.zaxis', p.time]];
   for (const [axis, color] of axes) {
     patch[axis + '.gridcolor'] = p.grid;
@@ -32,46 +58,6 @@ async function applySystemTheme() {
   syncSceneState(getLiveCamera(), currentView.value);
 }
 
-const STORAGE_KEY = 'ai_model_chart_hidden_ids';
-
-function getStoredHiddenIds() {
-  if (typeof window === 'undefined') return new Set();
-  try {
-    let raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw === null) {
-      // Carry existing session preferences into persistent storage once.
-      try {
-        raw = window.sessionStorage.getItem(STORAGE_KEY);
-        if (raw !== null) {
-          window.localStorage.setItem(STORAGE_KEY, raw);
-          window.sessionStorage.removeItem(STORAGE_KEY);
-        }
-      } catch {}
-    }
-    const parsed = raw ? JSON.parse(raw) : [];
-    return new Set(Array.isArray(parsed) ? parsed : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function saveStoredHiddenIds(idsSet) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([...idsSet]));
-  } catch {}
-}
-
-function clearStoredHiddenIds() {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.removeItem(STORAGE_KEY);
-  } catch {}
-  try {
-    window.sessionStorage.removeItem(STORAGE_KEY);
-  } catch {}
-}
-
 const chart = ref(null);
 const failed = ref(false);
 const updatedAt = ref(data.retrievedAt);
@@ -81,6 +67,7 @@ const updatedAtLabel = computed(() => {
     ? new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
     : 'Unknown';
 });
+
 const searchQuery = ref('');
 const searchOpen = ref(false);
 const searchInput = ref(null);
@@ -90,6 +77,52 @@ const chatError = ref('');
 const chatThread = ref(null);
 let chatAbort = null;
 let searchReturnFocus = null;
+
+const weightsFilter = ref('all'); // 'all' | 'open' | 'proprietary'
+const paretoOnly = ref(false);
+const currentView = ref('4');
+const hiddenIds = ref(getStoredHiddenIds());
+const hiddenCount = computed(() => hiddenIds.value.size);
+
+let ready = false;
+let hoveredModelId = null;
+let hoveredPoint = null;
+const fixedModelId = ref(null);
+
+let models = data.models.filter(canPlot);
+const plottableModelsRef = ref(models);
+let providers = [...new Set(models.map(m => m.creator))].sort();
+
+function parseSseChunk(buffer, onDelta) {
+  const lines = buffer.split('\n');
+  const remainder = lines.pop() ?? '';
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) continue;
+    const payloadStr = line.slice(5).trim();
+    if (!payloadStr || payloadStr === '[DONE]') continue;
+    try {
+      const parsed = JSON.parse(payloadStr);
+      const token = typeof parsed?.response === 'string'
+        ? parsed.response
+        : parsed?.choices?.[0]?.delta?.content || '';
+      if (token) onDelta(token);
+    } catch {}
+  }
+  return remainder;
+}
+
+async function openSearch() {
+  if (searchOpen.value) {
+    searchInput.value?.focus();
+    return;
+  }
+  searchReturnFocus = document.activeElement;
+  searchOpen.value = true;
+  await nextTick();
+  searchInput.value?.focus();
+}
+
 function closeSearch() {
   searchOpen.value = false;
   searchQuery.value = '';
@@ -99,6 +132,7 @@ function closeSearch() {
   chatLoading.value = false;
   searchReturnFocus?.focus();
 }
+
 function clearChat() {
   chatAbort?.abort();
   chatAbort = null;
@@ -107,11 +141,13 @@ function clearChat() {
   chatError.value = '';
   searchInput.value?.focus();
 }
+
 async function askAi(promptText = searchQuery.value) {
   const content = promptText.trim();
   if (!content || chatLoading.value) return;
   chatError.value = '';
   chatMessages.value.push({ role: 'user', content });
+  const requestMessages = chatMessages.value.map(m => ({ role: m.role, content: m.content }));
   searchQuery.value = '';
   chatLoading.value = true;
   await nextTick();
@@ -124,14 +160,44 @@ async function askAi(promptText = searchQuery.value) {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: chatMessages.value }),
+      body: JSON.stringify({ messages: requestMessages, stream: true }),
       signal: controller.signal
     });
-    const payload = await response.json().catch(() => ({}));
+    const contentType = response.headers.get('content-type') || '';
     if (!response.ok) {
+      if (response.status === 404 && import.meta.dev) {
+        throw new Error('Local dev server does not run the Cloudflare Worker /api/chat endpoint. Run "bunx wrangler dev" to test AI chat locally.');
+      }
+      const payload = await response.json().catch(() => ({}));
       throw new Error(payload?.error || `AI request failed (HTTP ${response.status})`);
     }
-    chatMessages.value.push({ role: 'assistant', content: payload.reply || 'No response received.' });
+
+    if (contentType.includes('text/event-stream') && response.body) {
+      const assistantMsg = { role: 'assistant', content: '' };
+      chatMessages.value.push(assistantMsg);
+      const msgIndex = chatMessages.value.length - 1;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        buffer = parseSseChunk(buffer, token => {
+          chatMessages.value[msgIndex].content += token;
+        });
+        if (chatThread.value) chatThread.value.scrollTop = chatThread.value.scrollHeight;
+      }
+      if (buffer.trim()) {
+        parseSseChunk(buffer + '\n', token => {
+          chatMessages.value[msgIndex].content += token;
+        });
+      }
+      chatMessages.value[msgIndex].content = chatMessages.value[msgIndex].content.trim() || 'No response received.';
+    } else {
+      const payload = await response.json().catch(() => ({}));
+      chatMessages.value.push({ role: 'assistant', content: payload.reply || 'No response received.' });
+    }
   } catch (error) {
     if (error?.name !== 'AbortError') {
       chatError.value = error?.message || 'Unable to reach Cloudflare Workers AI.';
@@ -146,6 +212,7 @@ async function askAi(promptText = searchQuery.value) {
     searchInput.value?.focus();
   }
 }
+
 function trapSearchFocus(event) {
   if (searchQuery.value.trim() && !event.shiftKey && event.target === searchInput.value) {
     return;
@@ -161,6 +228,7 @@ function trapSearchFocus(event) {
     first?.focus();
   }
 }
+
 async function handleSearchKey(event) {
   if (event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.key === 'Escape' && searchOpen.value) {
@@ -170,11 +238,9 @@ async function handleSearchKey(event) {
   }
   if (event.key !== '/' || event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
   event.preventDefault();
-  searchReturnFocus = document.activeElement;
-  searchOpen.value = true;
-  await nextTick();
-  searchInput.value?.focus();
+  await openSearch();
 }
+
 const searchData = ref(data.models);
 const searchResults = computed(() => {
   // Split names at letter/number boundaries too: deep4.1 -> deep + 4.1.
@@ -184,6 +250,7 @@ const searchResults = computed(() => {
     `${model.name} ${model.creator}`.normalize('NFKC').toLowerCase().includes(word)
   ));
 });
+
 const activeResult = ref(-1);
 watch(searchResults, results => {
   if (!searchQuery.value.trim()) {
@@ -193,6 +260,7 @@ watch(searchResults, results => {
   const firstPlottable = results.findIndex(canPlot);
   activeResult.value = firstPlottable >= 0 ? firstPlottable : results.length;
 });
+
 async function handleResultKey(event) {
   if (event.isComposing) return;
   if (event.key === 'Tab' && !event.shiftKey && searchQuery.value.trim() && event.target === searchInput.value) {
@@ -227,52 +295,93 @@ async function handleResultKey(event) {
   const targetId = activeResult.value === askIndex ? 'model-result-ask-ai' : `model-result-${activeResult.value}`;
   document.getElementById(targetId)?.scrollIntoView({ block: 'nearest' });
 }
-const canPlot = model => [model.intelligence, model.cost, model.timeSeconds]
-  .every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
-const formatMetric = (value, digits = 2, prefix = '', suffix = '') =>
-  typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? `${prefix}${value.toFixed(digits)}${suffix}` : '—';
-const formatReleaseDate = value =>
-  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(value) && Number.isFinite(Date.parse(value))
-    ? value.slice(0, 10) : '—';
-const missingMetrics = model => [
-  ['intelligence', 'intelligence'], ['cost', 'cost'], ['timeSeconds', 'time']
-].filter(([key]) => !(typeof model[key] === 'number' && Number.isFinite(model[key]) && model[key] >= 0))
-  .map(([, label]) => label).join(', ');
+
+function isModelVisibleByFilter(model, paretoSet = null) {
+  if (hiddenIds.value.has(model.id)) return false;
+  if (weightsFilter.value === 'open' && !model.openWeights) return false;
+  if (weightsFilter.value === 'proprietary' && model.openWeights) return false;
+  if (paretoOnly.value && paretoSet && !paretoSet.has(model.id)) return false;
+  return true;
+}
+
+function getVisibleModels() {
+  const baseCandidates = models.filter(m => {
+    if (hiddenIds.value.has(m.id)) return false;
+    if (weightsFilter.value === 'open' && !m.openWeights) return false;
+    if (weightsFilter.value === 'proprietary' && m.openWeights) return false;
+    return true;
+  });
+  if (!paretoOnly.value) return baseCandidates;
+  const paretoSet = computeParetoIds(baseCandidates, currentView.value);
+  return baseCandidates.filter(m => paretoSet.has(m.id));
+}
+
+function syncUrlState() {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (currentView.value !== '4') url.searchParams.set('view', currentView.value);
+  else url.searchParams.delete('view');
+
+  const fixedModel = models.find(m => m.id === fixedModelId.value && !hiddenIds.value.has(m.id));
+  if (fixedModel) url.searchParams.set('model', fixedModel.slug || fixedModel.id);
+  else url.searchParams.delete('model');
+
+  if (weightsFilter.value !== 'all') url.searchParams.set('weights', weightsFilter.value);
+  else url.searchParams.delete('weights');
+
+  if (paretoOnly.value) url.searchParams.set('pareto', '1');
+  else url.searchParams.delete('pareto');
+
+  window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+
+async function refreshPlotKeepCamera() {
+  if (!ready || !chart.value) return;
+  const savedCamera = getLiveCamera();
+  const layout = getLayout(false);
+  layout.scene.camera = savedCamera;
+  await Plotly.react(chart.value, createTraces(), layout, config).catch(console.error);
+  syncSceneState(savedCamera, currentView.value);
+}
+
+async function cycleWeightsFilter() {
+  const order = ['all', 'open', 'proprietary'];
+  weightsFilter.value = order[(order.indexOf(weightsFilter.value) + 1) % order.length];
+  syncUrlState();
+  await refreshPlotKeepCamera();
+}
+
+async function toggleParetoOnly() {
+  paretoOnly.value = !paretoOnly.value;
+  syncUrlState();
+  await refreshPlotKeepCamera();
+}
 
 async function locateModel(model) {
   if (!ready || !canPlot(model)) return;
+  let needsReact = false;
   if (hiddenIds.value.has(model.id)) {
-    const savedCamera = getLiveCamera();
     hiddenIds.value = new Set([...hiddenIds.value].filter(id => id !== model.id));
     saveStoredHiddenIds(hiddenIds.value);
-    const layout = getLayout(false);
-    layout.scene.camera = savedCamera;
-    await Plotly.react(chart.value, createTraces(), layout, config);
-    syncSceneState(savedCamera, currentView.value);
+    needsReact = true;
+  }
+  if ((weightsFilter.value === 'open' && !model.openWeights) || (weightsFilter.value === 'proprietary' && model.openWeights)) {
+    weightsFilter.value = 'all';
+    needsReact = true;
+  }
+  if (paretoOnly.value) {
+    const visibleIds = new Set(getVisibleModels().map(m => m.id));
+    if (!visibleIds.has(model.id)) {
+      paretoOnly.value = false;
+      needsReact = true;
+    }
+  }
+  if (needsReact) {
+    await refreshPlotKeepCamera();
   }
   centerOnPoint({ x: model.intelligence, y: model.cost, z: model.timeSeconds / 60 }, model.id);
   closeSearch();
 }
-
-const initialCamera = () => ({
-  eye: { x: 1.65, y: 1.65, z: 1.1 },
-  up: { x: 0, y: 0, z: 1 },
-  center: { x: 0, y: 0, z: 0 },
-  projection: { type: 'perspective' }
-});
-const currentView = ref('4');
-const planeViews = {
-  '1': { eye: { x: 0, y: 1.95, z: 0 }, up: { x: 0, y: 0, z: 1 }, hidden: 'yaxis', hiddenIdx: 1 },
-  '2': { eye: { x: 1.95, y: 0, z: 0 }, up: { x: 0, y: 0, z: 1 }, hidden: 'xaxis', hiddenIdx: 0 },
-  '3': { eye: { x: 0, y: 0, z: 1.95 }, up: { x: 0, y: -1, z: 0 }, hidden: 'zaxis', hiddenIdx: 2 }
-};
-const viewCamera = (view = currentView.value) => view === '4' ? initialCamera() : {
-  eye: { ...planeViews[view].eye },
-  up: { ...planeViews[view].up },
-  center: { x: 0, y: 0, z: 0 },
-  projection: { type: 'perspective' }
-};
 
 let orthoBlend = 0;
 let animFrameId = null;
@@ -402,7 +511,7 @@ function getLiveCamera() {
       projection: { type: 'perspective' }
     };
   }
-  const fallback = chart.value?._fullLayout?.scene?.camera ?? viewCamera();
+  const fallback = chart.value?._fullLayout?.scene?.camera ?? viewCamera(currentView.value);
   return {
     eye: { ...fallback.eye },
     center: { ...(fallback.center || { x: 0, y: 0, z: 0 }) },
@@ -416,89 +525,6 @@ function cancelCameraAnimation() {
     cancelAnimationFrame(animFrameId);
     animFrameId = null;
   }
-}
-
-const vecSub = (a, b) => [a.x - b.x, a.y - b.y, a.z - b.z];
-const vecDot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const vecCross = (a, b) => [
-  a[1] * b[2] - a[2] * b[1],
-  a[2] * b[0] - a[0] * b[2],
-  a[0] * b[1] - a[1] * b[0]
-];
-const vecNorm = v => {
-  const len = Math.hypot(v[0], v[1], v[2]);
-  return len > 1e-8 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 1];
-};
-function orthoUp(upVec, dirVec) {
-  const dot = vecDot(upVec, dirVec);
-  const proj = [upVec[0] - dot * dirVec[0], upVec[1] - dot * dirVec[1], upVec[2] - dot * dirVec[2]];
-  const len = Math.hypot(proj[0], proj[1], proj[2]);
-  if (len > 1e-6) return [proj[0] / len, proj[1] / len, proj[2] / len];
-  const fallback = Math.abs(dirVec[2]) < 0.9 ? [0, 0, 1] : [0, 1, 0];
-  return orthoUp(fallback, dirVec);
-}
-function rotateAroundAxis(v, axis, angle) {
-  if (Math.abs(angle) < 1e-8) return v;
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  const kDotV = vecDot(axis, v);
-  const kCrossV = vecCross(axis, v);
-  return [
-    v[0] * c + kCrossV[0] * s + axis[0] * kDotV * (1 - c),
-    v[1] * c + kCrossV[1] * s + axis[1] * kDotV * (1 - c),
-    v[2] * c + kCrossV[2] * s + axis[2] * kDotV * (1 - c)
-  ];
-}
-
-function interpolateCamera(from, to, t) {
-  const center = {
-    x: from.center.x + (to.center.x - from.center.x) * t,
-    y: from.center.y + (to.center.y - from.center.y) * t,
-    z: from.center.z + (to.center.z - from.center.z) * t
-  };
-  const v0 = vecSub(from.eye, from.center);
-  const v1 = vecSub(to.eye, to.center);
-  const r0 = Math.hypot(...v0) || 1.9;
-  const r1 = Math.hypot(...v1) || 1.9;
-  const radius = r0 + (r1 - r0) * t;
-
-  const d0 = [v0[0] / r0, v0[1] / r0, v0[2] / r0];
-  const d1 = [v1[0] / r1, v1[1] / r1, v1[2] / r1];
-  const cosOmega = Math.max(-1, Math.min(1, vecDot(d0, d1)));
-  let omega = Math.acos(cosOmega);
-  let rotAxis = vecCross(d0, d1);
-  const axisLen = Math.hypot(...rotAxis);
-  if (axisLen > 1e-6) {
-    rotAxis = [rotAxis[0] / axisLen, rotAxis[1] / axisLen, rotAxis[2] / axisLen];
-  } else if (cosOmega < 0) {
-    rotAxis = orthoUp([0, 0, 1], d0);
-    omega = Math.PI;
-  } else {
-    rotAxis = [0, 0, 1];
-    omega = 0;
-  }
-
-  const dir = rotateAroundAxis(d0, rotAxis, omega * t);
-  const u0 = orthoUp([from.up.x, from.up.y, from.up.z], d0);
-  const u1 = orthoUp([to.up.x, to.up.y, to.up.z], d1);
-  // Parallel-transport u0 along the sightline arc to d1, then measure twist angle to u1.
-  const u0AtEnd = orthoUp(rotateAroundAxis(u0, rotAxis, omega), d1);
-  const twistCos = Math.max(-1, Math.min(1, vecDot(u0AtEnd, u1)));
-  const twistSin = vecDot(d1, vecCross(u0AtEnd, u1));
-  const twistAngle = Math.atan2(twistSin, twistCos);
-  const uCarried = rotateAroundAxis(u0, rotAxis, omega * t);
-  const upArr = vecNorm(rotateAroundAxis(uCarried, dir, twistAngle * t));
-
-  return {
-    center,
-    eye: {
-      x: center.x + dir[0] * radius,
-      y: center.y + dir[1] * radius,
-      z: center.z + dir[2] * radius
-    },
-    up: { x: upArr[0], y: upArr[1], z: upArr[2] },
-    projection: { type: 'perspective' }
-  };
 }
 
 function applyLiveCamera(cam, blend) {
@@ -592,8 +618,12 @@ async function switchToView(targetView) {
   clearHover();
   const previousView = currentView.value;
   currentView.value = targetView;
+  syncUrlState();
+  if (paretoOnly.value && previousView !== targetView) {
+    await refreshPlotKeepCamera();
+  }
   const targetCam = viewCamera(targetView);
-  const fixedModel = models.find(model => model.id === fixedModelId && !hiddenIds.value.has(model.id));
+  const fixedModel = models.find(model => model.id === fixedModelId.value && !hiddenIds.value.has(model.id));
   if (fixedModel) {
     const center = pointToScene({ x: fixedModel.intelligence, y: fixedModel.cost, z: fixedModel.timeSeconds / 60 });
     const camera = getLiveCamera();
@@ -623,16 +653,21 @@ async function switchToView(targetView) {
 }
 
 async function handleViewKey(event) {
-  if (!['1', '2', '3', '4'].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey || event.repeat || event.isComposing || searchOpen.value) return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.repeat || event.isComposing || searchOpen.value) return;
   if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
   if (!ready || !chart.value) return;
-  event.preventDefault();
-  await switchToView(event.key);
+  const k = event.key.toLowerCase();
+  if (['1', '2', '3', '4'].includes(k)) {
+    event.preventDefault();
+    await switchToView(k);
+  } else if (k === 'p') {
+    event.preventDefault();
+    await toggleParetoOnly();
+  } else if (k === 'w') {
+    event.preventDefault();
+    await cycleWeightsFilter();
+  }
 }
-let ready = false;
-let hoveredModelId = null;
-let hoveredPoint = null;
-let fixedModelId = null;
 
 function clearHover() {
   // Clear Plotly's rendered tooltip.
@@ -645,11 +680,6 @@ function clearHover() {
   hoveredPoint = null;
 }
 
-const hiddenIds = ref(getStoredHiddenIds());
-const hiddenCount = computed(() => hiddenIds.value.size);
-
-let models = data.models.filter(m => [m.intelligence, m.cost, m.timeSeconds].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0));
-let providers = [...new Set(models.map(m => m.creator))].sort();
 const colors = {
   OpenAI: '#25805c',
   Anthropic: '#c16e47',
@@ -662,7 +692,9 @@ const colors = {
 const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
 function modelRange(key, scale = 1) {
-  const maximum = Math.max(0, ...models.filter(model => !hiddenIds.value.has(model.id)).map(model => model[key] / scale));
+  const visible = getVisibleModels();
+  const pool = visible.length ? visible : models.filter(model => !hiddenIds.value.has(model.id));
+  const maximum = Math.max(0, ...pool.map(model => model[key] / scale));
   if (!maximum) return [0, 1];
   const roughStep = maximum / 8;
   const magnitude = 10 ** Math.floor(Math.log10(roughStep));
@@ -695,9 +727,9 @@ const axis = (title, range, color, hideZero = false, prefix = '') => {
 };
 
 function createTraces() {
-  const currentHidden = hiddenIds.value;
+  const visibleSet = new Set(getVisibleModels().map(m => m.id));
   const traces = providers.map(provider => {
-    const group = models.filter(m => m.creator === provider && !currentHidden.has(m.id));
+    const group = models.filter(m => m.creator === provider && visibleSet.has(m.id));
     return {
       type: 'scatter3d',
       mode: 'markers',
@@ -706,17 +738,17 @@ function createTraces() {
       y: group.map(m => m.cost),
       z: group.map(m => m.timeSeconds / 60),
       text: group.map(m => escape(m.name)),
-      hovertext: group.map(m => formatReleaseDate(m.releaseDate)),
+      hovertext: group.map(m => `${formatReleaseDate(m.releaseDate)} · ${m.openWeights ? 'Open-weights' : 'Proprietary'}`),
       customdata: group.map(m => m.id),
       marker: {
-        size: group.map(() => 5),
+        size: group.map(m => m.id === fixedModelId.value ? 6.5 : 5),
         color: colors[provider] || (group[0] && group[0].color),
         opacity: 0.9,
         line: { color: palette().bg, width: 0.6 }
       },
       hovertemplate:
         '<b>%{text}</b><br>Provider: ' + escape(provider) +
-        '<br>Intelligence Index: %{x:.2f}<br>Cost per Task: $%{y:.4f}<br>Time per Task: %{z:.2f} min<br>Release date: %{hovertext}<br><span style="color:#94a3b8;font-size:11px;">Double-click to center · Right-click to hide</span><extra></extra>'
+        '<br>Intelligence Index: %{x:.2f}<br>Cost per Task: $%{y:.4f}<br>Time per Task: %{z:.2f} min<br>Release: %{hovertext}<br><span style="color:#94a3b8;font-size:11px;">Double-click to center · Right-click to hide</span><extra></extra>'
     };
   });
   traces.push({
@@ -751,7 +783,7 @@ const getLayout = (resetCamera = false) => ({
     yaxis: axis('Y · Cost per Task (USD)', modelRange('cost'), palette().cost, true, '$'),
     zaxis: axis('Z · Time per Task (min)', modelRange('timeSeconds', 60), palette().time, true),
     aspectmode: 'cube',
-    camera: resetCamera ? viewCamera() : getLiveCamera(),
+    camera: resetCamera ? viewCamera(currentView.value) : getLiveCamera(),
     dragmode: currentView.value === '4' ? 'orbit' : 'pan'
   },
   hoverlabel: { bgcolor: palette().panel, bordercolor: palette().border, font: { color: palette().text, size: 12 } }
@@ -762,8 +794,9 @@ async function hideModel(id) {
   cancelCameraAnimation();
   const savedCamera = getLiveCamera();
   hiddenIds.value = new Set([...hiddenIds.value, id]);
-  if (fixedModelId === id) fixedModelId = null;
+  if (fixedModelId.value === id) fixedModelId.value = null;
   saveStoredHiddenIds(hiddenIds.value);
+  syncUrlState();
   clearHover();
   const layout = getLayout(false);
   layout.scene.camera = savedCamera;
@@ -791,7 +824,8 @@ function centerOnPoint(pt, modelId) {
   if (!pt || !ready || !chart.value) return;
   const center = pointToScene(pt);
   if (!Object.values(center).every(Number.isFinite)) return;
-  fixedModelId = modelId ?? null;
+  fixedModelId.value = modelId ?? null;
+  syncUrlState();
 
   const camera = getLiveCamera();
   const previousCenter = camera.center || { x: 0, y: 0, z: 0 };
@@ -831,7 +865,7 @@ function handleWheel(event) {
   const dNew = Math.max(0.15, Math.min(12, d * zoomFactor));
   const s = dNew / d;
 
-  const fixedModel = models.find(model => model.id === fixedModelId && !hiddenIds.value.has(model.id));
+  const fixedModel = models.find(model => model.id === fixedModelId.value && !hiddenIds.value.has(model.id));
   if (fixedModel) {
     const anchor = pointToScene({ x: fixedModel.intelligence, y: fixedModel.cost, z: fixedModel.timeSeconds / 60 });
     // Scale both camera positions around the model so its screen position stays fixed.
@@ -889,24 +923,28 @@ function handleWheel(event) {
 }
 
 async function resetView(event) {
-  if (event) {
+  if (event && event instanceof KeyboardEvent) {
     if (event.key.toLowerCase() !== 'r' || event.ctrlKey || event.metaKey || event.altKey || event.repeat || event.isComposing || searchOpen.value) return;
     if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
   }
   if (!ready || !chart.value) return;
 
-  fixedModelId = null;
+  fixedModelId.value = null;
+  syncUrlState();
   clearHover();
   await switchToView(currentView.value);
 }
 
 async function resetAll() {
   if (!ready || !chart.value) return;
-  fixedModelId = null;
+  fixedModelId.value = null;
+  weightsFilter.value = 'all';
+  paretoOnly.value = false;
   cancelCameraAnimation();
   const currentCam = getLiveCamera();
   hiddenIds.value = new Set();
   clearStoredHiddenIds();
+  syncUrlState();
   clearHover();
   const layout = getLayout(false);
   layout.scene.camera = currentCam;
@@ -929,6 +967,15 @@ function handleDblClick(event) {
   }
 }
 
+const activeFilterBanner = computed(() => {
+  const parts = [];
+  if (hiddenCount.value > 0) parts.push(`${hiddenCount.value} hidden`);
+  if (weightsFilter.value === 'open') parts.push('Open-weights only');
+  if (weightsFilter.value === 'proprietary') parts.push('Proprietary only');
+  if (paretoOnly.value) parts.push('Pareto frontier');
+  return parts.join(' · ');
+});
+
 onMounted(async () => {
   await nextTick();
   themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
@@ -943,14 +990,39 @@ onMounted(async () => {
       data = { ...latest, models: latest.models.map(model => ({ ...model, releaseDate: model.releaseDate ?? knownDates.get(model.id) ?? null })) };
       searchData.value = data.models;
       updatedAt.value = data.retrievedAt;
-      models = data.models.filter(m => [m.intelligence, m.cost, m.timeSeconds].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0));
+      models = data.models.filter(canPlot);
+      plottableModelsRef.value = models;
       providers = [...new Set(models.map(m => m.creator))].sort();
     } catch (error) {
       console.warn('Using bundled model snapshot', error);
     }
-    await Plotly.newPlot(chart.value, createTraces(), { ...getLayout(true), camera: initialCamera() }, config);
+
+    const params = new URLSearchParams(window.location.search);
+    const urlView = params.get('view');
+    if (urlView && ['1', '2', '3', '4'].includes(urlView)) {
+      currentView.value = urlView;
+      orthoBlend = urlView === '4' ? 0 : 1;
+    }
+    const urlWeights = params.get('weights');
+    if (urlWeights && ['open', 'proprietary'].includes(urlWeights)) {
+      weightsFilter.value = urlWeights;
+    }
+    if (params.get('pareto') === '1') {
+      paretoOnly.value = true;
+    }
+
+    await Plotly.newPlot(chart.value, createTraces(), { ...getLayout(true), camera: viewCamera(currentView.value) }, config);
     installProjectionHook();
     ready = true;
+    syncSceneState(viewCamera(currentView.value), currentView.value);
+
+    const urlModelKey = params.get('model');
+    if (urlModelKey) {
+      const matched = models.find(m => m.id === urlModelKey || m.slug === urlModelKey || m.name.toLowerCase() === urlModelKey.toLowerCase());
+      if (matched) {
+        await locateModel(matched);
+      }
+    }
 
     chart.value.on('plotly_hover', (eventData) => {
       if (eventData?.points?.length) {
@@ -971,8 +1043,9 @@ onMounted(async () => {
         const p = eventData.points[0];
         hoveredModelId = p.customdata;
         const model = models.find(model => model.id === p.customdata);
-        fixedModelId = model?.id ?? null;
+        fixedModelId.value = model?.id ?? null;
         hoveredPoint = model ? { x: model.intelligence, y: model.cost, z: model.timeSeconds / 60 } : null;
+        syncUrlState();
       }
     });
 
@@ -1013,56 +1086,83 @@ onBeforeUnmount(() => {
 <template>
   <main aria-label="AI Model 3D Chart">
     <div v-if="searchOpen" class="search-overlay" @click.self="closeSearch">
-    <section class="model-search" :class="{ 'has-chat': chatMessages.length || chatLoading || chatError }" role="dialog" aria-modal="true" aria-label="Model search and AI chat" @keydown.tab="trapSearchFocus" @keydown="handleResultKey">
-      <div class="search-input-row">
-        <input ref="searchInput" v-model="searchQuery" type="search" aria-label="Search models or ask AI" :placeholder="chatMessages.length ? 'Ask a follow-up or search models...' : 'Search models or ask AI, e.g. compare GPT-6 and Claude'" autocomplete="off" aria-controls="model-search-results" :aria-activedescendant="activeResult >= 0 ? (activeResult === searchResults.length ? 'model-result-ask-ai' : `model-result-${activeResult}`) : undefined" />
-        <button v-if="searchQuery.trim()" type="button" class="ask-ai-pill" :disabled="chatLoading" @click="askAi()">Ask AI ↵</button>
-      </div>
-      <div class="search-help-row">
-        <p class="search-help">↑↓ Select · Enter Locate/Ask · Tab Ask AI · Esc Close</p>
-        <button v-if="chatMessages.length" type="button" class="clear-chat-btn" @click="clearChat">Clear chat</button>
-      </div>
-      <div v-if="searchQuery.trim()" class="search-results" aria-live="polite">
-        <p class="search-summary">{{ searchResults.length ? `${searchResults.length} models found` : 'No matching models · Press Enter to ask AI' }}</p>
-        <ul id="model-search-results">
-          <li v-for="(model, index) in searchResults" :key="model.id">
-            <button :id="`model-result-${index}`" type="button" :class="{ 'active-result': activeResult === index }" @focus="activeResult = index" @mouseenter="canPlot(model) && (activeResult = index)" :disabled="!ready || !canPlot(model)" @click="locateModel(model)">
-              <strong>{{ model.name }}</strong>
-              <small>Release date: {{ formatReleaseDate(model.releaseDate) }}</small>
-              <span class="result-metrics">
-                <span>Intelligence <b>{{ formatMetric(model.intelligence) }}</b></span>
-                <span>Cost <b>{{ formatMetric(model.cost, 4, '$') }}</b></span>
-                <span>Time <b>{{ formatMetric(typeof model.timeSeconds === 'number' ? model.timeSeconds / 60 : null, 2, '', ' min') }}</b></span>
-              </span>
-              <small>{{ model.creator }} · {{ canPlot(model) ? (hiddenIds.has(model.id) ? 'Show and locate' : 'Locate in chart') : `Missing ${missingMetrics(model)}; cannot locate` }}</small>
-            </button>
-          </li>
-          <li>
-            <button id="model-result-ask-ai" type="button" class="ask-ai-item" :class="{ 'active-result': activeResult === searchResults.length }" :disabled="chatLoading" @focus="activeResult = searchResults.length" @mouseenter="activeResult = searchResults.length" @click="askAi()">
-              <strong>✨ Ask AI: "{{ searchQuery.trim() }}"</strong>
-              <small>Compare models or analyze leaderboard data with Cloudflare Workers AI (Tab or Enter)</small>
-            </button>
-          </li>
-        </ul>
-      </div>
-      <div v-if="chatMessages.length || chatLoading || chatError" ref="chatThread" class="chat-thread" aria-live="polite">
-        <div v-for="(msg, idx) in chatMessages" :key="idx" class="chat-msg" :class="`chat-msg-${msg.role}`">
-          <span class="chat-role">{{ msg.role === 'user' ? 'You' : 'Cloudflare AI' }}</span>
-          <div class="chat-bubble">{{ msg.content }}</div>
+      <section class="model-search" :class="{ 'has-chat': chatMessages.length || chatLoading || chatError }" role="dialog" aria-modal="true" aria-label="Model search and AI chat" @keydown.tab="trapSearchFocus" @keydown="handleResultKey">
+        <div class="search-input-row">
+          <input ref="searchInput" v-model="searchQuery" type="search" aria-label="Search models or ask AI" :placeholder="chatMessages.length ? 'Ask a follow-up or search models...' : 'Search models or ask AI, e.g. compare GPT-6 and Claude'" autocomplete="off" aria-controls="model-search-results" :aria-activedescendant="activeResult >= 0 ? (activeResult === searchResults.length ? 'model-result-ask-ai' : `model-result-${activeResult}`) : undefined" />
+          <button v-if="searchQuery.trim()" type="button" class="ask-ai-pill" :disabled="chatLoading" @click="askAi()">Ask AI ↵</button>
         </div>
-        <div v-if="chatLoading" class="chat-msg chat-msg-assistant">
-          <span class="chat-role">Cloudflare AI</span>
-          <div class="chat-bubble chat-thinking">Analyzing leaderboard data…</div>
+        <div class="search-help-row">
+          <p class="search-help">↑↓ Select · Enter Locate/Ask · Tab Ask AI · Esc Close</p>
+          <button v-if="chatMessages.length" type="button" class="clear-chat-btn" @click="clearChat">Clear chat</button>
         </div>
-        <p v-if="chatError" class="chat-error" role="alert">{{ chatError }}</p>
-      </div>
-    </section>
+        <div v-if="searchQuery.trim()" class="search-results" aria-live="polite">
+          <p class="search-summary">{{ searchResults.length ? `${searchResults.length} models found` : 'No matching models · Press Enter to ask AI' }}</p>
+          <ul id="model-search-results">
+            <li v-for="(model, index) in searchResults" :key="model.id">
+              <button :id="`model-result-${index}`" type="button" :class="{ 'active-result': activeResult === index }" @focus="activeResult = index" @mouseenter="canPlot(model) && (activeResult = index)" :disabled="!ready || !canPlot(model)" @click="locateModel(model)">
+                <strong>{{ model.name }}</strong>
+                <small>Release date: {{ formatReleaseDate(model.releaseDate) }} · {{ model.openWeights ? 'Open-weights' : 'Proprietary' }}</small>
+                <span class="result-metrics">
+                  <span>Intelligence <b>{{ formatMetric(model.intelligence) }}</b></span>
+                  <span>Cost <b>{{ formatMetric(model.cost, 4, '$') }}</b></span>
+                  <span>Time <b>{{ formatMetric(typeof model.timeSeconds === 'number' ? model.timeSeconds / 60 : null, 2, '', ' min') }}</b></span>
+                </span>
+                <small>{{ model.creator }} · {{ canPlot(model) ? (hiddenIds.has(model.id) ? 'Show and locate' : 'Locate in chart') : `Missing ${missingMetrics(model)}; cannot locate` }}</small>
+              </button>
+            </li>
+            <li>
+              <button id="model-result-ask-ai" type="button" class="ask-ai-item" :class="{ 'active-result': activeResult === searchResults.length }" :disabled="chatLoading" @focus="activeResult = searchResults.length" @mouseenter="activeResult = searchResults.length" @click="askAi()">
+                <strong>✨ Ask AI: "{{ searchQuery.trim() }}"</strong>
+                <small>Compare models or analyze leaderboard data with Cloudflare Workers AI (Tab or Enter)</small>
+              </button>
+            </li>
+          </ul>
+        </div>
+        <div v-if="chatMessages.length || chatLoading || chatError" ref="chatThread" class="chat-thread" aria-live="polite">
+          <div v-for="(msg, idx) in chatMessages" :key="idx" class="chat-msg" :class="`chat-msg-${msg.role}`">
+            <span class="chat-role">{{ msg.role === 'user' ? 'You' : 'Cloudflare AI' }}</span>
+            <div class="chat-bubble">
+              <template v-if="msg.role === 'assistant'">
+                <template v-for="(seg, sIdx) in linkifyModelsInText(msg.content, plottableModelsRef)" :key="sIdx">
+                  <button v-if="seg.type === 'model'" type="button" class="chat-model-chip" :title="`Locate ${seg.model.name} in chart`" @click="locateModel(seg.model)">{{ seg.text }}</button>
+                  <span v-else>{{ seg.text }}</span>
+                </template>
+              </template>
+              <template v-else>{{ msg.content }}</template>
+            </div>
+          </div>
+          <div v-if="chatLoading && (!chatMessages.length || chatMessages.at(-1).role !== 'assistant' || !chatMessages.at(-1).content)" class="chat-msg chat-msg-assistant">
+            <span class="chat-role">Cloudflare AI</span>
+            <div class="chat-bubble chat-thinking">Analyzing leaderboard data…</div>
+          </div>
+          <p v-if="chatError" class="chat-error" role="alert">{{ chatError }}</p>
+        </div>
+      </section>
     </div>
-    <p class="usage-help"><span>/ Search · Double-click Center · Right-click Hide · R Reset view</span><span>1, 2, 3, 4 Switch views</span></p>
+    <nav class="usage-help" aria-label="Chart controls">
+      <button type="button" class="help-btn" title="Search models or ask AI (/)" @click="openSearch()">/ Search</button>
+      <span class="help-sep">·</span>
+      <span>Double-click Center · Right-click Hide</span>
+      <span class="help-sep">·</span>
+      <button type="button" class="help-btn" title="Reset camera view (R)" @click="resetView()">R Reset</button>
+      <span class="help-sep">·</span>
+      <span class="view-group" role="group" aria-label="View projection">
+        <button type="button" class="help-btn" :class="{ active: currentView === '1' }" title="Intelligence vs Time (1)" @click="switchToView('1')">1</button>
+        <button type="button" class="help-btn" :class="{ active: currentView === '2' }" title="Cost vs Time (2)" @click="switchToView('2')">2</button>
+        <button type="button" class="help-btn" :class="{ active: currentView === '3' }" title="Intelligence vs Cost (3)" @click="switchToView('3')">3</button>
+        <button type="button" class="help-btn" :class="{ active: currentView === '4' }" title="Free 3D view (4)" @click="switchToView('4')">4 3D</button>
+      </span>
+      <span class="help-sep">·</span>
+      <button type="button" class="help-btn" :class="{ active: paretoOnly }" title="Toggle Pareto-optimal frontier filter (P)" @click="toggleParetoOnly()">P Pareto</button>
+      <span class="help-sep">·</span>
+      <button type="button" class="help-btn" :class="{ active: weightsFilter !== 'all' }" title="Cycle Open-weights / Proprietary filter (W)" @click="cycleWeightsFilter()">
+        W {{ weightsFilter === 'all' ? 'All weights' : (weightsFilter === 'open' ? 'Open-weights' : 'Proprietary') }}
+      </button>
+    </nav>
     <p class="update-time">Last updated: <time :datetime="updatedAt">{{ updatedAtLabel }}</time> (UTC+8)</p>
     <div id="chart" :ref="el => chart = el" aria-label="X: Intelligence Index; Y: Cost per Task (USD); Z: Time per Task (min)" />
-    <div v-if="hiddenCount > 0" id="reset-tip" @click="resetAll()">
-      {{ hiddenCount }} models hidden · <span class="action">Click to show all and reset view</span>
+    <div v-if="activeFilterBanner" id="reset-tip" @click="resetAll()">
+      {{ activeFilterBanner }} · <span class="action">Click to show all and reset view</span>
     </div>
     <p v-if="failed" id="error" role="alert">Chart failed to load. Check that WebGL is enabled and refresh.</p>
   </main>
@@ -1077,7 +1177,12 @@ onBeforeUnmount(() => {
 .search-help { margin: 0; font-size: 11px; color: #64748b; }
 .clear-chat-btn { border: 0; background: none; padding: 2px 6px; font: inherit; font-size: 11px; color: #2563eb; cursor: pointer; border-radius: 4px; }
 .clear-chat-btn:hover { background: #eff6ff; }
-.usage-help { position: absolute; left: 18px; bottom: 14px; z-index: 10; margin: 0; max-width: calc(100vw - 36px); display: flex; flex-wrap: wrap; gap: 4px 16px; color: #7b8797; font-size: 11px; line-height: 1.7; pointer-events: none; }
+.usage-help { position: absolute; left: 18px; bottom: 14px; z-index: 10; margin: 0; max-width: calc(100vw - 36px); display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; color: #7b8797; font-size: 11px; line-height: 1.7; }
+.help-sep { opacity: 0.65; pointer-events: none; }
+.view-group { display: inline-flex; align-items: center; gap: 3px; }
+.help-btn { border: 1px solid transparent; background: transparent; color: inherit; font: inherit; padding: 1px 5px; border-radius: 4px; cursor: pointer; transition: all 0.15s ease; }
+.help-btn:hover { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+.help-btn.active { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; font-weight: 500; }
 .update-time { position: absolute; right: 18px; bottom: 14px; z-index: 10; margin: 0; color: #7b8797; font-size: 11px; line-height: 1.7; pointer-events: none; }
 @media (max-width: 1000px) { .usage-help { bottom: 36px; } }
 .model-search input { box-sizing: border-box; width: 100%; padding: 10px 84px 10px 12px; background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; color: #334155; font: inherit; box-shadow: 0 2px 8px #0000000a; }
@@ -1105,6 +1210,8 @@ onBeforeUnmount(() => {
 .chat-bubble { max-width: 92%; padding: 8px 11px; border-radius: 8px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; }
 .chat-msg-user .chat-bubble { background: #2563eb; color: #fff; border-bottom-right-radius: 2px; }
 .chat-msg-assistant .chat-bubble { background: #fff; color: #1e293b; border: 1px solid #e2e8f0; border-bottom-left-radius: 2px; }
+.chat-model-chip { display: inline; border: 1px solid #bfdbfe; background: #eff6ff; color: #1d4ed8; border-radius: 4px; padding: 0 4px; margin: 0 1px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; }
+.chat-model-chip:hover { background: #dbeafe; }
 .chat-thinking { color: #64748b; font-style: italic; }
 .chat-error { margin: 2px 0 0; padding: 8px 10px; border-radius: 6px; background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; font-size: 12px; }
 
@@ -1141,12 +1248,14 @@ onBeforeUnmount(() => {
     background: #182333; color: #dbe5f2; border-color: #40516a;
   }
   .search-help, .search-summary, .usage-help, .update-time, .result-metrics, .chat-role, .chat-thinking { color: #a2b1c6; }
+  .help-btn:hover { background: #24374e; color: #dbe5f2; border-color: #40516a; }
+  .help-btn.active { background: #1e3a5f; color: #93c5fd; border-color: #3b82f6; }
   .result-metrics b { color: #dbe5f2; }
   .search-results button.active-result, .search-results button:hover, .search-results button:focus-visible, #reset-tip:hover { background: #24374e; color: #dbe5f2; }
   .search-results button.ask-ai-item strong, .clear-chat-btn { color: #93c5fd; }
   .clear-chat-btn:hover { background: #24374e; }
-  .ask-ai-pill { background: #24374e; border-color: #3b82f6; color: #93c5fd; }
-  .ask-ai-pill:hover:not(:disabled) { background: #1e3a5f; }
+  .ask-ai-pill, .chat-model-chip { background: #24374e; border-color: #3b82f6; color: #93c5fd; }
+  .ask-ai-pill:hover:not(:disabled), .chat-model-chip:hover { background: #1e3a5f; }
   .chat-thread { background: #101722; border-color: #40516a; }
   .chat-msg-assistant .chat-bubble { background: #182333; color: #dbe5f2; border-color: #40516a; }
   .chat-error { background: #3b181e; border-color: #7f1d1d; color: #fca5a5; }

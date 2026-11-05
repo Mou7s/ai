@@ -90,6 +90,7 @@ async function handleChat(request, env) {
   }
 
   const rawMessages = Array.isArray(body?.messages) ? body.messages : [];
+  const wantStream = body?.stream === true;
   const sanitized = rawMessages
     .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
     .slice(-10)
@@ -117,8 +118,18 @@ async function handleChat(request, env) {
       const result = await env.AI.run(modelId, {
         messages: aiMessages,
         max_tokens: 700,
-        temperature: 0.2
+        temperature: 0.2,
+        ...(wantStream ? { stream: true } : {})
       });
+      if (wantStream && result instanceof ReadableStream) {
+        return new Response(result, {
+          headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            'X-AI-Model': modelId
+          }
+        });
+      }
       const reply = typeof result?.response === 'string'
         ? result.response.trim()
         : result?.choices?.[0]?.message?.content?.trim() || '';

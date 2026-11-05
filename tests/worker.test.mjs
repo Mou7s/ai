@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { refresh } from '../worker/index.mjs';
 import { extract } from '../lib/model-data.mjs';
+import { computeParetoIds, linkifyModelsInText } from '../app/utils/chartFilters.js';
 
 test('API serves stored snapshot and falls back when KV is unavailable', async () => {
   const request = new Request('https://example.com/api/data');
@@ -73,6 +74,33 @@ test('/api/chat injects matched model data into Cloudflare Workers AI prompt', a
   assert.ok(capturedInput.messages[0].content.includes('Beta-2'));
 });
 
+test('/api/chat returns SSE stream when stream=true and Workers AI returns ReadableStream', async () => {
+  const env = {
+    MODEL_DATA: { get: async () => JSON.stringify({ retrievedAt: '2026-10-28T00:00:00.000Z', models: [] }) },
+    AI: {
+      run: async (_model, input) => {
+        assert.equal(input.stream, true);
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: {"response":"Hello"}\n\n'));
+            controller.close();
+          }
+        });
+      }
+    }
+  };
+  const req = new Request('https://example.com/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], stream: true })
+  });
+  const res = await worker.fetch(req, env);
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get('content-type').includes('text/event-stream'));
+  const text = await res.text();
+  assert.ok(text.includes('"response":"Hello"'));
+});
+
 test('extract handles manifest objects regardless of key order', () => {
   const flightReversed = '"manifest":{"key":"abc12345","path":"/data/sample.txt"}';
   const html = `self.__next_f.push([1,${JSON.stringify(flightReversed)}])`;
@@ -80,4 +108,36 @@ test('extract handles manifest objects regardless of key order', () => {
   assert.equal(result.manifests?.length, 1);
   assert.equal(result.manifests[0].path, '/data/sample.txt');
   assert.equal(result.manifests[0].key, 'abc12345');
+});
+
+test('computeParetoIds filters dominated models across views', () => {
+  const candidates = [
+    { id: 'smart-expensive', intelligence: 60, cost: 10, timeSeconds: 60 },
+    { id: 'dominated-all', intelligence: 50, cost: 12, timeSeconds: 80 },
+    { id: 'cheap-fast', intelligence: 45, cost: 1, timeSeconds: 15 },
+    { id: 'mid-smart-slow', intelligence: 55, cost: 2, timeSeconds: 120 }
+  ];
+  const pareto3d = computeParetoIds(candidates, '4');
+  assert.ok(pareto3d.has('smart-expensive'));
+  assert.ok(pareto3d.has('cheap-fast'));
+  assert.ok(pareto3d.has('mid-smart-slow'));
+  assert.ok(!pareto3d.has('dominated-all'));
+
+  // In view '1' (Intelligence vs Time), mid-smart-slow is dominated by smart-expensive (60 >= 55 and 60s < 120s)
+  const paretoView1 = computeParetoIds(candidates, '1');
+  assert.ok(paretoView1.has('smart-expensive'));
+  assert.ok(paretoView1.has('cheap-fast'));
+  assert.ok(!paretoView1.has('mid-smart-slow'));
+});
+
+test('linkifyModelsInText turns mentioned plottable models into interactive tokens', () => {
+  const models = [
+    { id: '1', name: 'DeepSeek R1', shortName: 'DeepSeek R1', intelligence: 50, cost: 1, timeSeconds: 30 },
+    { id: '2', name: 'Claude 4.5 Sonnet', shortName: 'Claude 4.5', intelligence: 55, cost: 3, timeSeconds: 20 }
+  ];
+  const segments = linkifyModelsInText('Between DeepSeek R1 and Claude 4.5 Sonnet, both are strong.', models);
+  const modelTokens = segments.filter(s => s.type === 'model');
+  assert.equal(modelTokens.length, 2);
+  assert.equal(modelTokens[0].model.id, '1');
+  assert.equal(modelTokens[1].model.id, '2');
 });

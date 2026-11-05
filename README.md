@@ -6,14 +6,16 @@ Live site: [ai.mou7s.com](https://ai.mou7s.com)
 
 ## Using the chart
 
-- Drag to rotate, scroll to zoom, and hover over a point to inspect its metrics.
+- Drag to rotate, scroll to zoom, and hover over a point to inspect its metrics, release date, and open-weights status.
 - Click a model to anchor scroll zoom to that point, even after moving the pointer away. Double-clicking or locating a search result also sets the anchor. Switching views centers on the anchored model and preserves the zoom distance. Resetting the view or hiding the anchored model restores zoom at the pointer.
 - Press `1` for intelligence/time, `2` for cost/time, `3` for intelligence/cost, and `4` to return to free 3D. Plane views use 2D axes; drag to pan and scroll to zoom at the pointer. Better values point toward the upper right.
-- Press `/` to search by model or provider. Search ignores case and splits letters from numbers, so `deep4.1` matches DeepSeek V4.1 Flash.
-- Use ↑ / ↓ to select a search result, Enter to locate it, and Esc to close search. Results show intelligence, cost, and time; unavailable metrics appear as `—` and cannot be located.
+- Press `P` to toggle the **Pareto frontier** filter (retaining only non-dominated models for the active 3D or 2D view). Press `W` to cycle between all models, open-weights only, and proprietary only.
+- Press `/` to search by model or provider, or to ask **Cloudflare Workers AI** about the leaderboard. Search ignores case and splits letters from numbers, so `deep4.1` matches DeepSeek V4.1 Flash.
+- Use ↑ / ↓ to select a search result, Enter to locate it, Tab (or Enter on the AI prompt option) to ask Cloudflare Workers AI (`POST /api/chat` with streaming SSE), and Esc to close search. Results show release date, open-weights status, intelligence, cost, and time; unavailable metrics appear as `—` and cannot be located. Model names mentioned in AI responses are interactive pills that locate the model directly in the chart.
 - Double-click a point to center the camera without changing axis bounds or marker sizes.
 - Right-click a point to hide it. Hidden models are saved in localStorage and persist across browser sessions on the same browser and site. Searching for a hidden model and selecting it restores it.
-- Press R to reset the current view while keeping hidden models hidden. Click the hidden-model notice to show all models and reset the view. Shortcuts do not interrupt typing in the search field.
+- Press `R` to reset the current view while keeping hidden models hidden. Click the top-right status notice to clear active filters, show all models, and reset the view. All bottom toolbar controls (`/ Search`, `R Reset`, `1`–`4`, `P Pareto`, `W Weights`) are also clickable for touch and mouse navigation.
+- URL query parameters (`?view=`, `?model=`, `?weights=`, `?pareto=1`) automatically sync with the active view, anchored model, and filters for direct sharing.
 
 Axes use muted blue (intelligence), green (cost), and purple (time). Bounds start at zero and end on regular ticks. A small target (a thin ring and center dot) marks the ideal corner for higher intelligence, lower cost, and less time, without a text label or background; it is not a combined model ranking.
 
@@ -32,11 +34,11 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
-Development runs at http://127.0.0.1:3000. The chart loads only in the browser. `bun run build` generates `.output/public`; `bun run preview` previews the generated site. The local Nuxt server does not run the production Worker's `/api/data` endpoint, so the chart falls back to its bundled snapshot.
+Development runs at http://127.0.0.1:3000. The chart loads only in the browser. `bun run build` generates `.output/public`; `bun run preview` previews the generated site. The local Nuxt server does not run the production Worker's `/api/data` or `/api/chat` endpoints, so the chart falls back to its bundled snapshot; use `bunx wrangler dev` after building to test the Worker endpoints locally.
 
 ## Deployment on push
 
-Production uses Cloudflare Workers with Static Assets and the `MODEL_DATA` KV namespace configured in `wrangler.jsonc`. Cloudflare runs the Worker, not Bun.
+Production uses Cloudflare Workers with Static Assets, the `MODEL_DATA` KV namespace, and the `AI` Workers AI binding configured in `wrangler.jsonc`. Cloudflare runs the Worker, not Bun.
 
 Connect the existing `ai` Worker to Git using these Cloudflare Workers Builds settings:
 
@@ -52,7 +54,7 @@ Connect the existing `ai` Worker to Git using these Cloudflare Workers Builds se
 
 Once connected, pushing to `main` triggers a Cloudflare build and deployment to `ai.mou7s.com`. Check the Worker's Builds page for the commit, logs, and deployment result. Authentication is managed by Cloudflare Workers Builds; no GitHub Actions deployment token is needed. This repository intentionally has no separate GitHub Actions deployment workflow.
 
-For manual deployment, run `bunx wrangler login`, then `bun run deploy`. The existing account, custom domain, KV namespace, and Cron schedule are declared in `wrangler.jsonc`.
+For manual deployment, run `bunx wrangler login`, then `bun run deploy`. The existing account, custom domain, KV namespace, Workers AI binding, and Cron schedule are declared in `wrangler.jsonc`.
 
 ## Scheduled data refresh
 
